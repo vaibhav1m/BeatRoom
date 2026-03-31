@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
@@ -17,6 +17,7 @@ const ChannelPage = () => {
     return () => setActiveChannelId(null);
   }, [channelId, setActiveChannelId]);
 
+  // Channel & chat state
   const [channel, setChannel] = useState(null);
   const [queue, setQueue] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -25,15 +26,147 @@ const ChannelPage = () => {
   const [searchResults, setSearchResults] = useState([]);
   const [showSearch, setShowSearch] = useState(false);
   const [showEmoji, setShowEmoji] = useState(false);
-  const [showMembers, setShowMembers] = useState(false);
-  const [currentSong, setCurrentSong] = useState(null);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [typing, setTyping] = useState([]);
+
+  // Player state
+  const [currentSong, setCurrentSong] = useState(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  // Volume persisted in localStorage
+  const [volume, setVolume] = useState(() => {
+    const v = localStorage.getItem('beatroom_volume');
+    return v !== null ? parseInt(v, 10) : 80;
+  });
+  const [isMuted, setIsMuted] = useState(() => localStorage.getItem('beatroom_muted') === 'true');
+  const [isRepeat, setIsRepeat] = useState(false);
+  const [isShuffle, setIsShuffle] = useState(false);
+  const [songHistory, setSongHistory] = useState([]);
+  const [ytApiReady, setYtApiReady] = useState(false);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekDraft, setSeekDraft] = useState(0);
+
+  // Import playlist state
+  const [showImportPlaylist, setShowImportPlaylist] = useState(false);
+  const [myPlaylists, setMyPlaylists] = useState([]);
+  const [importingPlaylist, setImportingPlaylist] = useState(null);
+
+  // Save to playlist state
+  const [songToSave, setSongToSave] = useState(null); // song object to save
+  const [savingToPlaylist, setSavingToPlaylist] = useState(null); // playlistId currently saving to
+  const [saveSuccess, setSaveSuccess] = useState(null); // playlistId that just succeeded
+
+  // Queue drag-to-reorder state
+  const [dragFromIndex, setDragFromIndex] = useState(null);
+  const [dragOverIndex, setDragOverIndex] = useState(null);
+
+  // Right panel tab + online tracking
+  const [rightTab, setRightTab] = useState('chat');
+  const [onlineUserIds, setOnlineUserIds] = useState(() => new Set());
+
+  // Refs
   const chatEndRef = useRef(null);
-  const playerRef = useRef(null);
   const typingTimeout = useRef(null);
+  const ytPlayerInstance = useRef(null);
+  const timeInterval = useRef(null);
+  const isRepeatRef = useRef(false);
+  const currentSongRef = useRef(null);
+  const socketRef = useRef(socket);          // always-current socket for YT callbacks
+  const pendingSyncRef = useRef(null);       // sync to apply once YT player is ready
+
+  useEffect(() => { isRepeatRef.current = isRepeat; }, [isRepeat]);
+  useEffect(() => { currentSongRef.current = currentSong; }, [currentSong]);
+  useEffect(() => { socketRef.current = socket; }, [socket]);
+
+  // Persist volume to localStorage
+  useEffect(() => { localStorage.setItem('beatroom_volume', volume); }, [volume]);
+  useEffect(() => { localStorage.setItem('beatroom_muted', isMuted); }, [isMuted]);
+
+  // Load YouTube IFrame API once
+  useEffect(() => {
+    if (window.YT && window.YT.Player) {
+      setYtApiReady(true);
+      return;
+    }
+    window.onYouTubeIframeAPIReady = () => setYtApiReady(true);
+    if (!document.getElementById('yt-iframe-api')) {
+      const tag = document.createElement('script');
+      tag.id = 'yt-iframe-api';
+      tag.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(tag);
+    }
+  }, []);
+
+  // Create YT player when song changes
+  useEffect(() => {
+    if (!ytApiReady) return;
+    clearInterval(timeInterval.current);
+    if (ytPlayerInstance.current) {
+      try { ytPlayerInstance.current.destroy(); } catch (e) {}
+      ytPlayerInstance.current = null;
+    }
+    if (!currentSong || currentSong.source !== 'youtube') {
+      setCurrentTime(0);
+      setDuration(0);
+      return;
+    }
+    if (currentSong.duration) setDuration(currentSong.duration);
+
+    const capturedVolume = volume;
+    const capturedMuted = isMuted;
+    const capturedPlaying = isPlaying;
+
+    ytPlayerInstance.current = new window.YT.Player('yt-player-div', {
+      height: '200',
+      width: '100%',
+      videoId: currentSong.sourceId,
+      playerVars: { autoplay: capturedPlaying ? 1 : 0, enablejsapi: 1, origin: window.location.origin },
+      events: {
+        onReady: (e) => {
+          e.target.setVolume(capturedVolume);
+          if (capturedMuted) e.target.mute();
+          const dur = e.target.getDuration();
+          if (dur) setDuration(dur);
+          // Apply any sync that arrived before the player was ready
+          if (pendingSyncRef.current) {
+            const { isPlaying: p, currentTime: ct } = pendingSyncRef.current;
+            e.target.seekTo(ct, true);
+            if (p) e.target.playVideo(); else e.target.pauseVideo();
+            pendingSyncRef.current = null;
+          }
+        },
+        onStateChange: (e) => {
+          if (e.data === window.YT.PlayerState.PLAYING) {
+            clearInterval(timeInterval.current);
+            timeInterval.current = setInterval(() => {
+              if (ytPlayerInstance.current && ytPlayerInstance.current.getCurrentTime) {
+                setCurrentTime(ytPlayerInstance.current.getCurrentTime());
+                const d = ytPlayerInstance.current.getDuration();
+                if (d && d > 0) setDuration(d);
+              }
+            }, 500);
+          }
+          if (e.data === window.YT.PlayerState.PAUSED) {
+            clearInterval(timeInterval.current);
+          }
+          if (e.data === window.YT.PlayerState.ENDED) {
+            clearInterval(timeInterval.current);
+            if (isRepeatRef.current) {
+              e.target.seekTo(0, true);
+              e.target.playVideo();
+            } else {
+              // Use socketRef to avoid stale closure
+              socketRef.current?.emit('queue:next', { channelId });
+            }
+          }
+        },
+      },
+    });
+
+    return () => clearInterval(timeInterval.current);
+  }, [currentSong?._id, ytApiReady]);
 
   // Fetch channel data
   useEffect(() => {
@@ -44,6 +177,11 @@ const ChannelPage = () => {
         setQueue(res.data.queue);
         setCurrentSong(res.data.channel.currentSong);
         setIsPlaying(res.data.channel.playbackState?.isPlaying || false);
+        // Seed online users from DB isOnline field
+        const online = new Set(
+          (res.data.channel.members || []).filter(m => m.isOnline).map(m => m._id)
+        );
+        setOnlineUserIds(online);
       } catch (err) {
         console.error(err);
         navigate('/dashboard');
@@ -69,16 +207,44 @@ const ChannelPage = () => {
     const handleDeleted = ({ messageId }) => {
       setMessages(prev => prev.filter(m => m._id !== messageId));
     };
-    const handlePlayerState = ({ isPlaying: playing, currentTime, song }) => {
+    const handlePlayerState = ({ isPlaying: playing, currentTime: ct, song }) => {
       setIsPlaying(playing);
-      setCurrentSong(song);
+      if (song !== undefined) {
+        if (song && currentSongRef.current && song._id !== currentSongRef.current._id) {
+          setSongHistory(prev => [...prev.slice(-9), currentSongRef.current]);
+        }
+        setCurrentSong(song);
+      }
+      setCurrentTime(ct || 0);
+      if (ytPlayerInstance.current) {
+        try {
+          ytPlayerInstance.current.seekTo(ct || 0, true);
+          if (playing) ytPlayerInstance.current.playVideo();
+          else ytPlayerInstance.current.pauseVideo();
+        } catch (e) {}
+      } else {
+        // Player not created yet — store sync to apply in onReady
+        pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
+      }
+    };
+    const handlePlayerSeek = ({ currentTime: ct }) => {
+      setCurrentTime(ct);
+      if (ytPlayerInstance.current) {
+        try { ytPlayerInstance.current.seekTo(ct, true); } catch (e) {}
+      } else {
+        pendingSyncRef.current = pendingSyncRef.current
+          ? { ...pendingSyncRef.current, currentTime: ct }
+          : { isPlaying: false, currentTime: ct };
+      }
     };
     const handleQueueUpdate = (q) => setQueue(q);
     const handleUserJoined = ({ user: joinedUser }) => {
       setChannel(prev => prev ? { ...prev, members: [...(prev.members || []), joinedUser] } : prev);
+      setOnlineUserIds(prev => new Set([...prev, joinedUser._id]));
     };
     const handleUserLeft = ({ userId }) => {
       setChannel(prev => prev ? { ...prev, members: (prev.members || []).filter(m => m._id !== userId) } : prev);
+      setOnlineUserIds(prev => { const s = new Set(prev); s.delete(userId); return s; });
     };
     const handleTyping = ({ username }) => {
       setTyping(prev => [...new Set([...prev, username])]);
@@ -92,6 +258,7 @@ const ChannelPage = () => {
     socket.on('chat:reaction-update', handleReaction);
     socket.on('chat:deleted', handleDeleted);
     socket.on('player:state', handlePlayerState);
+    socket.on('player:seek', handlePlayerSeek);
     socket.on('queue:updated', handleQueueUpdate);
     socket.on('channel:user-joined', handleUserJoined);
     socket.on('channel:user-left', handleUserLeft);
@@ -105,6 +272,7 @@ const ChannelPage = () => {
       socket.off('chat:reaction-update', handleReaction);
       socket.off('chat:deleted', handleDeleted);
       socket.off('player:state', handlePlayerState);
+      socket.off('player:seek', handlePlayerSeek);
       socket.off('queue:updated', handleQueueUpdate);
       socket.off('channel:user-joined', handleUserJoined);
       socket.off('channel:user-left', handleUserLeft);
@@ -113,17 +281,26 @@ const ChannelPage = () => {
     };
   }, [socket, channelId]);
 
+  // Cleanup YT player on unmount
+  useEffect(() => {
+    return () => {
+      clearInterval(timeInterval.current);
+      if (ytPlayerInstance.current) {
+        try { ytPlayerInstance.current.destroy(); } catch (e) {}
+      }
+    };
+  }, []);
+
   // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // ── Chat actions ──────────────────────────────────────────────────────────
   const sendMessage = (e) => {
     e.preventDefault();
     if (!chatInput.trim() || !socket) return;
-    socket.emit('chat:message', {
-      channelId, content: chatInput, replyTo: replyTo?._id,
-    });
+    socket.emit('chat:message', { channelId, content: chatInput, replyTo: replyTo?._id });
     setChatInput('');
     setReplyTo(null);
     socket.emit('chat:stop-typing', { channelId });
@@ -138,22 +315,72 @@ const ChannelPage = () => {
     }, 2000);
   };
 
-  const toggleReaction = (messageId, emoji) => {
-    socket?.emit('chat:reaction', { messageId, emoji });
-  };
+  const toggleReaction = (messageId, emoji) => socket?.emit('chat:reaction', { messageId, emoji });
 
+  // ── Player actions ────────────────────────────────────────────────────────
   const togglePlayback = () => {
     if (isPlaying) {
-      socket?.emit('player:pause', { channelId, currentTime: 0 });
+      socket?.emit('player:pause', { channelId, currentTime });
     } else {
-      socket?.emit('player:play', { channelId, songId: currentSong?._id, currentTime: 0 });
+      socket?.emit('player:play', { channelId, songId: currentSong?._id, currentTime });
     }
   };
 
-  const skipNext = () => {
-    socket?.emit('queue:next', { channelId });
+  const skipNext = () => socket?.emit('queue:next', { channelId });
+
+  const playPrevious = () => {
+    if (currentTime > 3) {
+      socket?.emit('player:seek', { channelId, currentTime: 0 });
+      socket?.emit('player:play', { channelId, songId: currentSong?._id, currentTime: 0 });
+    } else if (songHistory.length > 0) {
+      const prev = songHistory[songHistory.length - 1];
+      setSongHistory(h => h.slice(0, -1));
+      socket?.emit('player:play', { channelId, songId: prev._id, currentTime: 0 });
+    }
   };
 
+  const handleSeekCommit = (e) => {
+    const time = parseFloat(e.target.value);
+    setCurrentTime(time);
+    setIsSeeking(false);
+    socket?.emit('player:seek', { channelId, currentTime: time });
+    try { ytPlayerInstance.current?.seekTo(time, true); } catch (e) {}
+  };
+
+  const handleVolumeChange = (e) => {
+    const vol = parseInt(e.target.value);
+    setVolume(vol);
+    setIsMuted(vol === 0);
+    try {
+      if (ytPlayerInstance.current) {
+        ytPlayerInstance.current.setVolume(vol);
+        if (vol === 0) ytPlayerInstance.current.mute();
+        else ytPlayerInstance.current.unMute();
+      }
+    } catch (err) {}
+  };
+
+  const toggleMute = () => {
+    const newMuted = !isMuted;
+    setIsMuted(newMuted);
+    try {
+      if (ytPlayerInstance.current) {
+        if (newMuted) ytPlayerInstance.current.mute();
+        else {
+          ytPlayerInstance.current.unMute();
+          ytPlayerInstance.current.setVolume(volume || 80);
+        }
+      }
+    } catch (err) {}
+  };
+
+  const toggleShuffle = () => {
+    const next = !isShuffle;
+    setIsShuffle(next);
+    if (next && queue?.items?.length > 1) socket?.emit('queue:shuffle', { channelId });
+  };
+
+  // ── Queue actions ─────────────────────────────────────────────────────────
   const searchSongs = async () => {
     if (!searchQuery.trim()) return;
     try {
@@ -174,11 +401,81 @@ const ChannelPage = () => {
     setSearchResults([]);
   };
 
+  const fetchMyPlaylists = async () => {
+    if (myPlaylists.length > 0) return;
+    try {
+      const res = await api.get('/api/playlists/my');
+      setMyPlaylists(res.data.playlists || []);
+    } catch (err) {
+      console.error('Failed to fetch playlists:', err);
+    }
+  };
+
+  const importPlaylist = (playlist) => {
+    if (!playlist.songs?.length) return;
+    setImportingPlaylist(playlist._id);
+    const songs = playlist.songs.map(s => ({
+      title: s.title,
+      artist: s.artist,
+      source: s.source,
+      sourceId: s.sourceId,
+      thumbnail: s.thumbnail,
+      duration: s.duration,
+      album: s.album,
+    }));
+    socket?.emit('queue:add-many', { channelId, songs });
+    setTimeout(() => {
+      setImportingPlaylist(null);
+      setShowImportPlaylist(false);
+    }, 800);
+  };
+
+  const openSaveToPlaylist = (song) => {
+    setSongToSave(song);
+    setSaveSuccess(null);
+    fetchMyPlaylists();
+  };
+
+  const handleSaveToPlaylist = async (playlistId) => {
+    if (!songToSave?._id) return;
+    setSavingToPlaylist(playlistId);
+    try {
+      await api.post(`/api/playlists/${playlistId}/songs`, { songId: songToSave._id });
+      setSaveSuccess(playlistId);
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed to save song');
+    } finally {
+      setSavingToPlaylist(null);
+    }
+  };
+
   const upvoteSong = (index) => socket?.emit('queue:upvote', { channelId, itemIndex: index });
   const downvoteSong = (index) => socket?.emit('queue:downvote', { channelId, itemIndex: index });
   const removeFromQueue = (index) => socket?.emit('queue:remove', { channelId, itemIndex: index });
+  const playAt = (index) => socket?.emit('queue:play-at', { channelId, itemIndex: index });
+
+  // Drag-to-reorder handlers
+  const handleDragStart = (e, index) => {
+    setDragFromIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+  const handleDragOver = (e, index) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverIndex(index);
+  };
+  const handleDrop = (e, toIndex) => {
+    e.preventDefault();
+    if (dragFromIndex !== null && dragFromIndex !== toIndex) {
+      socket?.emit('queue:reorder', { channelId, fromIndex: dragFromIndex, toIndex });
+    }
+    setDragFromIndex(null);
+    setDragOverIndex(null);
+  };
+  const handleDragEnd = () => { setDragFromIndex(null); setDragOverIndex(null); };
 
   const isAdmin = channel?.admin?._id === user?._id || user?.role === 'superadmin';
+  const canControl = isAdmin || channel?.allowAllControl;
 
   if (loading) {
     return <div className="page-container"><div className="skeleton" style={{ height: '60vh', borderRadius: 'var(--radius-lg)' }} /></div>;
@@ -200,11 +497,14 @@ const ChannelPage = () => {
           <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--font-size-sm)' }}>{channel?.description}</p>
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-          <button className="btn btn-secondary btn-sm" onClick={() => setShowMembers(!showMembers)}>
+          <button className="btn btn-secondary btn-sm" onClick={() => setRightTab('members')}>
             👥 {channel?.members?.length || 0}
           </button>
           <button className="btn btn-primary btn-sm" onClick={() => setShowSearch(true)}>
             ➕ Add Song
+          </button>
+          <button className="btn btn-secondary btn-sm" onClick={() => { setShowImportPlaylist(true); fetchMyPlaylists(); }}>
+            📋 Import Playlist
           </button>
           {isAdmin && (
             <button className="btn btn-secondary btn-sm" onClick={async () => {
@@ -214,49 +514,102 @@ const ChannelPage = () => {
               {channel?.allowAllControl ? '🔓 All Control' : '🔒 Admin Only'}
             </button>
           )}
-          <button className="btn btn-ghost btn-sm" title="Invite Code" onClick={() => {
-            navigator.clipboard.writeText(channel?.inviteCode || '');
-            alert(`Invite code copied: ${channel?.inviteCode}`);
-          }}>📋 Invite</button>
+          <button className="btn btn-ghost btn-sm" title="Copy invite link" onClick={() => {
+            const url = `${window.location.origin}/join/${channel?.inviteCode}`;
+            navigator.clipboard.writeText(url);
+            alert(`Invite link copied!`);
+          }}>🔗 Invite</button>
         </div>
       </div>
 
-      {/* Main Layout: Player + Chat + Queue */}
+      {/* Main Layout */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: 'var(--space-4)', height: 'calc(100vh - 220px)' }}>
         {/* Left: Player + Queue */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', minHeight: 0 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', minHeight: 0, overflowY: 'auto' }}>
+
           {/* Player */}
-          <div className="glass-card" style={{ padding: 'var(--space-6)' }}>
+          <div className="glass-card" style={{ padding: 'var(--space-5)' }}>
             {currentSong ? (
               <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)' }}>
+                {/* Song info */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', marginBottom: 'var(--space-4)' }}>
                   {currentSong.thumbnail && (
-                    <img src={currentSong.thumbnail} alt="" style={{ width: 100, height: 100, borderRadius: 'var(--radius-md)', objectFit: 'cover' }} />
+                    <img src={currentSong.thumbnail} alt="" style={{ width: 72, height: 72, borderRadius: 'var(--radius-md)', objectFit: 'cover', flexShrink: 0 }} />
                   )}
-                  <div style={{ flex: 1 }}>
-                    <h2 style={{ fontSize: 'var(--font-size-xl)', fontWeight: 700 }}>{currentSong.title}</h2>
-                    <p style={{ color: 'var(--text-secondary)', marginTop: 'var(--space-1)' }}>{currentSong.artist}</p>
-                    {currentSong.source === 'youtube' && (
-                      <div style={{ marginTop: 'var(--space-4)' }}>
-                        <iframe
-                          ref={playerRef}
-                          width="100%"
-                          height="200"
-                          src={`https://www.youtube.com/embed/${currentSong.sourceId}?autoplay=${isPlaying ? 1 : 0}&enablejsapi=1`}
-                          allow="autoplay; encrypted-media"
-                          allowFullScreen
-                          style={{ borderRadius: 'var(--radius-md)', border: 'none' }}
-                        />
-                      </div>
-                    )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <h2 style={{ fontSize: 'var(--font-size-lg)', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentSong.title}</h2>
+                    <p style={{ color: 'var(--text-secondary)', marginTop: 'var(--space-1)', fontSize: 'var(--font-size-sm)' }}>{currentSong.artist}</p>
                   </div>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    title="Save to playlist"
+                    onClick={() => openSaveToPlaylist(currentSong)}
+                    style={{ flexShrink: 0 }}
+                  >💾</button>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'center', gap: 'var(--space-4)', marginTop: 'var(--space-4)' }}>
-                  <button className="btn btn-ghost btn-icon" onClick={skipNext} title="Skip">⏭️</button>
-                  <button className="player-btn-play" onClick={togglePlayback} style={{ cursor: 'pointer', border: 'none', width: 56, height: 56, borderRadius: '50%', background: 'var(--gradient-primary)', color: 'white', fontSize: '24px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    {isPlaying ? '⏸' : '▶'}
-                  </button>
-                  <button className="btn btn-ghost btn-icon" onClick={skipNext} title="Next">⏩</button>
+
+                {/* YouTube player */}
+                {currentSong.source === 'youtube' && (
+                  <div style={{ marginBottom: 'var(--space-4)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
+                    <div id="yt-player-div" style={{ width: '100%', minHeight: 200 }} />
+                  </div>
+                )}
+
+                {/* Seek bar */}
+                <div className="seek-bar-container">
+                  <span className="seek-time">{formatDuration(isSeeking ? seekDraft : currentTime)}</span>
+                  <input
+                    type="range"
+                    className="seek-bar"
+                    min={0}
+                    max={duration || 1}
+                    step={0.5}
+                    value={isSeeking ? seekDraft : Math.min(currentTime, duration || currentTime)}
+                    onMouseDown={() => { setIsSeeking(true); setSeekDraft(currentTime); }}
+                    onChange={(e) => setSeekDraft(parseFloat(e.target.value))}
+                    onMouseUp={handleSeekCommit}
+                    onTouchEnd={handleSeekCommit}
+                    disabled={!canControl}
+                    title={canControl ? 'Seek' : 'Admin only'}
+                  />
+                  <span className="seek-time">{formatDuration(duration)}</span>
+                </div>
+
+                {/* Controls */}
+                <div className="player-controls">
+                  {/* Left: Shuffle */}
+                  <button
+                    className={`player-ctrl-btn player-mode-btn${isShuffle ? ' player-ctrl-active' : ''}`}
+                    onClick={toggleShuffle}
+                    title={isShuffle ? 'Shuffle: On' : 'Shuffle: Off'}
+                  >🔀 <span className="player-mode-label">Shuffle</span></button>
+
+                  {/* Center: Prev / Play / Next */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flex: 1, justifyContent: 'center' }}>
+                    <button
+                      className="player-ctrl-btn"
+                      onClick={playPrevious}
+                      title="Previous"
+                      disabled={!canControl || (songHistory.length === 0 && currentTime <= 3)}
+                    >⏮</button>
+                    <button
+                      className="player-btn-play"
+                      onClick={togglePlayback}
+                      disabled={!canControl}
+                      style={{ opacity: !canControl ? 0.5 : 1 }}
+                      title={isPlaying ? 'Pause' : 'Play'}
+                    >
+                      {isPlaying ? '⏸' : '▶'}
+                    </button>
+                    <button className="player-ctrl-btn" onClick={skipNext} title="Skip next" disabled={!canControl}>⏭</button>
+                  </div>
+
+                  {/* Right: Repeat */}
+                  <button
+                    className={`player-ctrl-btn player-mode-btn${isRepeat ? ' player-ctrl-active' : ''}`}
+                    onClick={() => setIsRepeat(r => !r)}
+                    title={isRepeat ? 'Repeat: On' : 'Repeat: Off'}
+                  >🔁 <span className="player-mode-label">Repeat</span></button>
                 </div>
               </div>
             ) : (
@@ -271,29 +624,58 @@ const ChannelPage = () => {
           </div>
 
           {/* Queue */}
-          <div className="queue-container" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <div className="queue-container" style={{ flex: 1, minHeight: 220, display: 'flex', flexDirection: 'column' }}>
             <div className="queue-header">
               <h3 style={{ fontWeight: 700 }}>📋 Queue ({queue?.items?.length || 0})</h3>
-              {isAdmin && queue?.items?.length > 0 && (
-                <button className="btn btn-danger btn-sm" onClick={() => socket?.emit('queue:clear', { channelId })}>Clear</button>
-              )}
+              <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                {queue?.items?.length > 1 && (
+                  <button className="btn btn-ghost btn-sm" onClick={toggleShuffle} title="Shuffle queue">🔀 Shuffle</button>
+                )}
+                {isAdmin && queue?.items?.length > 0 && (
+                  <button className="btn btn-danger btn-sm" onClick={() => socket?.emit('queue:clear', { channelId })}>Clear</button>
+                )}
+              </div>
             </div>
             <div className="queue-list" style={{ flex: 1, overflow: 'auto' }}>
               {queue?.items?.map((item, i) => (
-                <div key={i} className="queue-item">
+                <div
+                  key={i}
+                  className={`queue-item${dragOverIndex === i && dragFromIndex !== i ? ' queue-drag-over' : ''}${dragFromIndex === i ? ' queue-dragging' : ''}`}
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, i)}
+                  onDragOver={(e) => handleDragOver(e, i)}
+                  onDrop={(e) => handleDrop(e, i)}
+                  onDragEnd={handleDragEnd}
+                >
+                  <span className="queue-drag-handle" title="Drag to reorder">⠿</span>
                   <span className="queue-item-position">{i + 1}</span>
-                  {item.song?.thumbnail && <img src={item.song.thumbnail} alt="" className="queue-item-thumbnail" />}
-                  <div className="queue-item-info">
+                  <div
+                    className="queue-item-thumb-wrap"
+                    onClick={() => canControl && playAt(i)}
+                    title={canControl ? 'Play now' : ''}
+                    style={{ cursor: canControl ? 'pointer' : 'default' }}
+                  >
+                    {item.song?.thumbnail && <img src={item.song.thumbnail} alt="" className="queue-item-thumbnail" />}
+                    {canControl && <span className="queue-item-play-overlay">▶</span>}
+                  </div>
+                  <div
+                    className="queue-item-info"
+                    onClick={() => canControl && playAt(i)}
+                    style={{ cursor: canControl ? 'pointer' : 'default' }}
+                  >
                     <div className="queue-item-title">{item.song?.title}</div>
-                    <div className="queue-item-artist">{item.song?.artist} • Added by {item.addedBy?.username}</div>
+                    <div className="queue-item-artist">{item.song?.artist} • {item.addedBy?.username}</div>
                   </div>
                   <div className="queue-item-votes">
-                    <button className={`queue-vote-btn ${item.upvotes?.includes(user?._id) ? 'upvoted' : ''}`}
+                    <button className={`queue-vote-btn${item.upvotes?.includes(user?._id) ? ' upvoted' : ''}`}
                       onClick={() => upvoteSong(i)}>👍</button>
                     <span className="queue-vote-count">{(item.upvotes?.length || 0) - (item.downvotes?.length || 0)}</span>
-                    <button className={`queue-vote-btn ${item.downvotes?.includes(user?._id) ? 'downvoted' : ''}`}
+                    <button className={`queue-vote-btn${item.downvotes?.includes(user?._id) ? ' downvoted' : ''}`}
                       onClick={() => downvoteSong(i)}>👎</button>
-                    <button className="queue-vote-btn" onClick={() => removeFromQueue(i)}>✕</button>
+                    <button className="queue-vote-btn" onClick={() => openSaveToPlaylist(item.song)} title="Save to playlist">💾</button>
+                    {(canControl || item.addedBy?._id === user?._id) && (
+                      <button className="queue-vote-btn" onClick={() => removeFromQueue(i)} title="Remove">✕</button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -306,14 +688,70 @@ const ChannelPage = () => {
           </div>
         </div>
 
-        {/* Right: Chat */}
+        {/* Right: Chat + Members (tabbed) */}
         <div className="chat-container" style={{ height: '100%' }}>
-          <div className="chat-header">
-            <h3 style={{ fontWeight: 700 }}>💬 Chat</h3>
-            <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>
-              {channel?.members?.length} online
-            </span>
+          {/* Tab bar */}
+          <div className="right-panel-tabs">
+            <button
+              className={`right-panel-tab${rightTab === 'chat' ? ' active' : ''}`}
+              onClick={() => setRightTab('chat')}
+            >💬 Chat</button>
+            <button
+              className={`right-panel-tab${rightTab === 'members' ? ' active' : ''}`}
+              onClick={() => setRightTab('members')}
+            >👥 Members <span className="tab-count">{channel?.members?.length || 0}</span></button>
           </div>
+
+          {/* Members panel */}
+          {rightTab === 'members' && (
+            <div style={{ flex: 1, overflow: 'auto', padding: 'var(--space-3)' }}>
+              {channel?.members?.map(member => {
+                const isOnline = onlineUserIds.has(member._id) || member._id === user?._id;
+                return (
+                  <div key={member._id} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                    marginBottom: 'var(--space-2)',
+                    background: 'var(--surface-glass)',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                      <div style={{ position: 'relative' }}>
+                        <div className="avatar avatar-sm avatar-placeholder" style={{ background: getAvatarColor(member.username), fontSize: '11px' }}>
+                          {getInitials(member.username)}
+                        </div>
+                        <div style={{
+                          position: 'absolute', bottom: 0, right: 0,
+                          width: 10, height: 10, borderRadius: '50%',
+                          background: isOnline ? 'var(--accent-success)' : 'var(--text-muted)',
+                          border: '2px solid var(--bg-secondary)',
+                        }} />
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 'var(--font-size-sm)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                          {member.username}
+                          {member._id === channel.admin?._id && (
+                            <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: 'var(--radius-full)', background: 'var(--accent-primary-glow)', color: 'var(--accent-primary)' }}>Admin</span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 'var(--font-size-xs)', color: isOnline ? 'var(--accent-success)' : 'var(--text-muted)' }}>
+                          {isOnline ? '● Online' : '○ Offline'}
+                        </div>
+                      </div>
+                    </div>
+                    {isAdmin && member._id !== user?._id && member._id !== channel.admin?._id && (
+                      <button className="btn btn-danger btn-sm" onClick={async () => {
+                        await api.post(`/api/channels/${channelId}/kick/${member._id}`);
+                        setChannel(prev => ({ ...prev, members: prev.members.filter(m => m._id !== member._id) }));
+                      }}>Kick</button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Chat panel */}
+          {rightTab === 'chat' && (<>
           <div className="chat-messages" style={{ flex: 1, overflow: 'auto' }}>
             {messages.map((msg) => (
               <div key={msg._id} className="chat-message">
@@ -371,8 +809,7 @@ const ChannelPage = () => {
           )}
           <form className="chat-input-bar" onSubmit={sendMessage}>
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowEmoji(!showEmoji)}>😀</button>
-            <input className="chat-input" placeholder="Type a message..." value={chatInput}
-              onChange={handleTypingInput} />
+            <input className="chat-input" placeholder="Type a message..." value={chatInput} onChange={handleTypingInput} />
             <button type="submit" className="btn btn-primary btn-sm">Send</button>
           </form>
           {showEmoji && (
@@ -389,39 +826,102 @@ const ChannelPage = () => {
               ))}
             </div>
           )}
+          </>)}
         </div>
       </div>
 
-      {/* Members Panel */}
-      {showMembers && (
+      {/* Save to Playlist Modal */}
+      {songToSave && (
         <>
-          <div className="modal-backdrop" onClick={() => setShowMembers(false)} />
-          <div className="modal">
+          <div className="modal-backdrop" onClick={() => { setSongToSave(null); setSaveSuccess(null); }} />
+          <div className="modal" style={{ maxWidth: 480 }}>
             <div className="modal-header">
-              <h2>👥 Members ({channel?.members?.length})</h2>
-              <button className="modal-close" onClick={() => setShowMembers(false)}>✕</button>
+              <h2>💾 Save to Playlist</h2>
+              <button className="modal-close" onClick={() => { setSongToSave(null); setSaveSuccess(null); }}>✕</button>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-              {channel?.members?.map(member => (
-                <div key={member._id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'var(--space-3)', borderRadius: 'var(--radius-md)', background: 'var(--surface-glass)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-                    <div className="avatar avatar-sm avatar-placeholder" style={{ background: getAvatarColor(member.username) }}>
-                      {getInitials(member.username)}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-4)', padding: 'var(--space-3)', background: 'var(--surface-glass)', borderRadius: 'var(--radius-md)' }}>
+              {songToSave.thumbnail && <img src={songToSave.thumbnail} alt="" style={{ width: 44, height: 44, borderRadius: 'var(--radius-sm)', objectFit: 'cover' }} />}
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 'var(--font-size-sm)' }}>{songToSave.title}</div>
+                <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>{songToSave.artist}</div>
+              </div>
+            </div>
+            {myPlaylists.length === 0 ? (
+              <div style={{ padding: 'var(--space-6)', textAlign: 'center', color: 'var(--text-muted)' }}>
+                No playlists yet.{' '}
+                <button className="btn btn-ghost btn-sm" onClick={() => { setSongToSave(null); navigate('/playlist'); }}>
+                  Create one
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', maxHeight: 320, overflowY: 'auto' }}>
+                {myPlaylists.map(pl => {
+                  const alreadySaved = saveSuccess === pl._id;
+                  return (
+                    <div key={pl._id} style={{
+                      display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
+                      padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                      background: 'var(--surface-glass)',
+                    }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 600, fontSize: 'var(--font-size-sm)' }}>{pl.name}</div>
+                        <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>{pl.songs?.length || 0} songs</div>
+                      </div>
+                      <button
+                        className={`btn btn-sm ${alreadySaved ? 'btn-secondary' : 'btn-primary'}`}
+                        disabled={savingToPlaylist === pl._id || alreadySaved}
+                        onClick={() => handleSaveToPlaylist(pl._id)}
+                      >
+                        {alreadySaved ? '✓ Saved' : savingToPlaylist === pl._id ? 'Saving...' : '+ Save'}
+                      </button>
                     </div>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 'var(--font-size-sm)' }}>{member.username}</div>
-                      {member._id === channel.admin?._id && <span className="badge" style={{ background: 'var(--accent-primary-glow)', color: 'var(--accent-primary)', fontSize: '10px' }}>Admin</span>}
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Import Playlist Modal */}
+      {showImportPlaylist && (
+        <>
+          <div className="modal-backdrop" onClick={() => setShowImportPlaylist(false)} />
+          <div className="modal" style={{ maxWidth: 560 }}>
+            <div className="modal-header">
+              <h2>📋 Import Playlist to Queue</h2>
+              <button className="modal-close" onClick={() => setShowImportPlaylist(false)}>✕</button>
+            </div>
+            {myPlaylists.length === 0 ? (
+              <div style={{ padding: 'var(--space-8)', textAlign: 'center', color: 'var(--text-muted)' }}>
+                You have no playlists yet. Create one from the Playlists page!
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+                {myPlaylists.map(pl => (
+                  <div key={pl._id} style={{
+                    display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
+                    padding: 'var(--space-3)', borderRadius: 'var(--radius-md)',
+                    background: 'var(--surface-glass)',
+                  }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600, fontSize: 'var(--font-size-sm)' }}>{pl.name}</div>
+                      <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>
+                        {pl.songs?.length || 0} songs
+                        {pl.description && ` · ${pl.description}`}
+                      </div>
                     </div>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={() => importPlaylist(pl)}
+                      disabled={importingPlaylist === pl._id || !pl.songs?.length}
+                    >
+                      {importingPlaylist === pl._id ? 'Adding...' : '+ Add All'}
+                    </button>
                   </div>
-                  {isAdmin && member._id !== user?._id && member._id !== channel.admin?._id && (
-                    <button className="btn btn-danger btn-sm" onClick={async () => {
-                      await api.post(`/api/channels/${channelId}/kick/${member._id}`);
-                      setChannel(prev => ({ ...prev, members: prev.members.filter(m => m._id !== member._id) }));
-                    }}>Kick</button>
-                  )}
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </>
       )}

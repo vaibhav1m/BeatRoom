@@ -45,8 +45,17 @@ const queueHandler = (io, socket) => {
   socket.on('queue:remove', async (data) => {
     try {
       const { channelId, itemIndex } = data;
+      const channel = await Channel.findById(channelId);
+      if (!channel) return;
       const queue = await Queue.findOne({ channel: channelId });
-      if (!queue) return;
+      if (!queue || !queue.items[itemIndex]) return;
+
+      const isAdmin = channel.admin.toString() === socket.user._id.toString() || socket.user.role === 'superadmin';
+      const isAdder = queue.items[itemIndex].addedBy?.toString() === socket.user._id.toString();
+      if (!channel.allowAllControl && !isAdmin && !isAdder) {
+        return socket.emit('error', { message: 'Only admin or the song adder can remove this' });
+      }
+
       queue.items.splice(itemIndex, 1);
       await queue.save();
       const populated = await Queue.findById(queue._id)
@@ -120,6 +129,127 @@ const queueHandler = (io, socket) => {
       io.to(`channel:${channelId}`).emit('queue:updated', { channel: channelId, items: [] });
     } catch (err) {
       socket.emit('error', { message: 'Failed to clear queue' });
+    }
+  });
+
+  // Reorder queue item (drag and drop)
+  socket.on('queue:reorder', async (data) => {
+    try {
+      const { channelId, fromIndex, toIndex } = data;
+      const queue = await Queue.findOne({ channel: channelId });
+      if (!queue || fromIndex === toIndex) return;
+      if (fromIndex < 0 || toIndex < 0 || fromIndex >= queue.items.length || toIndex >= queue.items.length) return;
+      const [moved] = queue.items.splice(fromIndex, 1);
+      queue.items.splice(toIndex, 0, moved);
+      queue.markModified('items');
+      await queue.save();
+      const populated = await Queue.findById(queue._id)
+        .populate('items.song')
+        .populate('items.addedBy', 'username avatar');
+      io.to(`channel:${channelId}`).emit('queue:updated', populated);
+    } catch (err) {
+      socket.emit('error', { message: 'Failed to reorder queue' });
+    }
+  });
+
+  // Play a specific song from the queue immediately
+  socket.on('queue:play-at', async (data) => {
+    try {
+      const { channelId, itemIndex } = data;
+      const channel = await Channel.findById(channelId);
+      if (!channel) return;
+      if (!channel.allowAllControl && channel.admin.toString() !== socket.user._id.toString() && socket.user.role !== 'superadmin') {
+        return socket.emit('error', { message: 'Only admin can control playback' });
+      }
+      const queue = await Queue.findOne({ channel: channelId });
+      if (!queue || !queue.items[itemIndex]) return;
+      const [item] = queue.items.splice(itemIndex, 1);
+      queue.markModified('items');
+      await queue.save();
+      const song = await Song.findById(item.song);
+      channel.currentSong = song._id;
+      channel.playbackState = { isPlaying: true, currentTime: 0, updatedAt: new Date() };
+      await channel.save();
+      await Song.findByIdAndUpdate(song._id, { $inc: { playCount: 1 } });
+      io.to(`channel:${channelId}`).emit('player:state', {
+        isPlaying: true, currentTime: 0, song, controlledBy: socket.user.username,
+      });
+      const populated = await Queue.findById(queue._id)
+        .populate('items.song')
+        .populate('items.addedBy', 'username avatar');
+      io.to(`channel:${channelId}`).emit('queue:updated', populated);
+    } catch (err) {
+      socket.emit('error', { message: 'Failed to play song' });
+    }
+  });
+
+  // Shuffle queue
+  socket.on('queue:shuffle', async (data) => {
+    try {
+      const { channelId } = data;
+      const queue = await Queue.findOne({ channel: channelId });
+      if (!queue || queue.items.length < 2) return;
+      for (let i = queue.items.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const temp = queue.items[i];
+        queue.items[i] = queue.items[j];
+        queue.items[j] = temp;
+      }
+      queue.markModified('items');
+      await queue.save();
+      const populated = await Queue.findById(queue._id)
+        .populate('items.song')
+        .populate('items.addedBy', 'username avatar');
+      io.to(`channel:${channelId}`).emit('queue:updated', populated);
+    } catch (err) {
+      socket.emit('error', { message: 'Failed to shuffle queue' });
+    }
+  });
+
+  // Add multiple songs to queue (playlist import)
+  socket.on('queue:add-many', async (data) => {
+    try {
+      const { channelId, songs } = data;
+      if (!Array.isArray(songs) || songs.length === 0) return;
+
+      let queue = await Queue.findOne({ channel: channelId });
+      if (!queue) queue = await Queue.create({ channel: channelId, items: [] });
+
+      for (const songData of songs) {
+        let song = await Song.findOne({ source: songData.source, sourceId: songData.sourceId });
+        if (!song) {
+          song = await Song.create({ ...songData, addedBy: socket.user._id });
+        }
+        queue.items.push({ song: song._id, addedBy: socket.user._id });
+      }
+      await queue.save();
+
+      const populated = await Queue.findById(queue._id)
+        .populate('items.song')
+        .populate('items.addedBy', 'username avatar');
+      io.to(`channel:${channelId}`).emit('queue:updated', populated);
+
+      // Auto-play first song if nothing is currently playing
+      const channel = await Channel.findById(channelId);
+      if (!channel.currentSong && queue.items.length > 0) {
+        const [firstItem] = queue.items.splice(0, 1);
+        await queue.save();
+        const song = await Song.findById(firstItem.song);
+        channel.currentSong = song._id;
+        channel.playbackState = { isPlaying: true, currentTime: 0, updatedAt: new Date() };
+        await channel.save();
+        await Song.findByIdAndUpdate(song._id, { $inc: { playCount: 1 } });
+        io.to(`channel:${channelId}`).emit('player:state', {
+          isPlaying: true, currentTime: 0, song, controlledBy: 'auto-play',
+        });
+        const updatedQueue = await Queue.findById(queue._id)
+          .populate('items.song')
+          .populate('items.addedBy', 'username avatar');
+        io.to(`channel:${channelId}`).emit('queue:updated', updatedQueue);
+      }
+    } catch (err) {
+      console.error('Queue add-many error:', err);
+      socket.emit('error', { message: 'Failed to add songs to queue' });
     }
   });
 

@@ -153,19 +153,57 @@ exports.kickUser = async (req, res, next) => {
   }
 };
 
+// GET /api/channels/invite/:inviteCode
+exports.getChannelByInvite = async (req, res, next) => {
+  try {
+    const channel = await Channel.findOne({ inviteCode: req.params.inviteCode })
+      .populate('admin', 'username');
+    if (!channel) return res.status(404).json({ success: false, error: 'Invalid invite code' });
+    res.json({
+      success: true,
+      channel: {
+        _id: channel._id,
+        name: channel.name,
+        type: channel.type,
+        description: channel.description,
+        memberCount: channel.members.length,
+        adminName: channel.admin?.username,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // POST /api/channels/join/:inviteCode
 exports.joinByInvite = async (req, res, next) => {
   try {
-    const channel = await Channel.findOne({ inviteCode: req.params.inviteCode });
+    const channel = await Channel.findOne({ inviteCode: req.params.inviteCode }).select('+password');
     if (!channel) return res.status(404).json({ success: false, error: 'Invalid invite code' });
-    if (channel.members.includes(req.user._id)) {
-      return res.status(400).json({ success: false, error: 'Already a member' });
-    }
     if (channel.bannedUsers.includes(req.user._id)) {
       return res.status(403).json({ success: false, error: 'You are banned from this channel' });
     }
+    // Already a member — just return channel so client can navigate
+    if (channel.members.includes(req.user._id)) {
+      const populated = await Channel.findById(channel._id)
+        .populate('admin', 'username avatar')
+        .populate('members', 'username avatar isOnline');
+      return res.json({ success: true, channel: populated });
+    }
+    if (channel.type === 'private') {
+      const { password } = req.body;
+      if (!password) return res.status(400).json({ success: false, error: 'Password required', requiresPassword: true });
+      const isMatch = await bcrypt.compare(password, channel.password);
+      if (!isMatch) return res.status(401).json({ success: false, error: 'Incorrect channel password' });
+    }
     channel.members.push(req.user._id);
     await channel.save();
+    await Notification.create({
+      recipient: channel.admin,
+      type: 'user_joined',
+      message: `${req.user.username} joined your channel "${channel.name}" via invite link`,
+      data: { channelId: channel._id, userId: req.user._id },
+    });
     const populated = await Channel.findById(channel._id)
       .populate('admin', 'username avatar')
       .populate('members', 'username avatar isOnline');

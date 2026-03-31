@@ -11,6 +11,7 @@ import ProfilePage from './pages/ProfilePage';
 import PlaylistPage from './pages/PlaylistPage';
 import SearchPage from './pages/SearchPage';
 import AdminPage from './pages/AdminPage';
+import JoinPage from './pages/JoinPage';
 import Layout from './components/layout/Layout';
 import './App.css';
 
@@ -42,6 +43,7 @@ const AppRoutes = () => {
     <Routes>
       <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
       <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
+      <Route path="/join/:inviteCode" element={<ProtectedRoute><JoinPage /></ProtectedRoute>} />
       <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="dashboard" element={<DashboardPage />} />

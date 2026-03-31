@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+const path = require('path');
 const connectDB = require('./config/db');
 const { initSocket } = require('./config/socket');
 const config = require('./config/env');
@@ -40,6 +41,15 @@ app.use('/api/admin', require('./routes/admin'));
 
 // Error handler
 app.use(errorHandler);
+
+// Serve React frontend in production
+if (config.NODE_ENV === 'production') {
+  const clientBuild = path.join(__dirname, '../client/dist');
+  app.use(express.static(clientBuild));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(clientBuild, 'index.html'));
+  });
+}
 
 // Start server
 server.listen(config.PORT, () => {
