@@ -17,6 +17,7 @@ export const PlayerProvider = ({ children }) => {
   const [isMuted, setIsMuted] = useState(false);
   const [queue, setQueue] = useState([]);
   const [currentChannelId, setCurrentChannelId] = useState(null);
+  const [channelName, setChannelName] = useState(null);
 
   const playSong = useCallback((song) => {
     setCurrentSong(song);
@@ -64,9 +65,9 @@ export const PlayerProvider = ({ children }) => {
     <PlayerContext.Provider
       value={{
         currentSong, isPlaying, progress, duration, volume, isMuted, queue,
-        currentChannelId,
+        currentChannelId, channelName,
         setCurrentSong, setIsPlaying, setProgress, setDuration, setVolume,
-        setIsMuted, setQueue, setCurrentChannelId,
+        setIsMuted, setQueue, setCurrentChannelId, setChannelName,
         playSong, togglePlay, pause, play, skipNext, toggleMute,
         addToQueue, removeFromQueue, clearQueue,
       }}

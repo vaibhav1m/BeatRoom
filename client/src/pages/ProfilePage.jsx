@@ -15,6 +15,7 @@ const ProfilePage = () => {
   const [editing, setEditing] = useState(false);
   const [editData, setEditData] = useState({ username: '', bio: '', avatar: '' });
   const [loading, setLoading] = useState(true);
+  const [friendRequestSent, setFriendRequestSent] = useState(false);
 
   const isOwnProfile = !userId || userId === currentUser?._id;
 
@@ -50,7 +51,7 @@ const ProfilePage = () => {
   const handleSendFriendRequest = async () => {
     try {
       await api.post(`/api/users/friend-request/${profileUser._id}`);
-      alert('Friend request sent!');
+      setFriendRequestSent(true);
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to send request');
     }
@@ -96,9 +97,16 @@ const ProfilePage = () => {
                 <div style={{ marginTop: 'var(--space-4)', display: 'flex', gap: 'var(--space-3)' }}>
                   {isOwnProfile ? (
                     <button className="btn btn-secondary" onClick={() => setEditing(true)}>✏️ Edit Profile</button>
-                  ) : (
-                    <button className="btn btn-primary" onClick={handleSendFriendRequest}>👋 Add Friend</button>
-                  )}
+                  ) : (() => {
+                    const isFriend = profileUser?.friends?.some(f => f._id === currentUser?._id || f === currentUser?._id);
+                    if (isFriend) {
+                      return <button className="btn btn-secondary" disabled>Friends ✓</button>;
+                    }
+                    if (friendRequestSent) {
+                      return <button className="btn btn-secondary" disabled>Request Sent</button>;
+                    }
+                    return <button className="btn btn-primary" onClick={handleSendFriendRequest}>👋 Add Friend</button>;
+                  })()}
                 </div>
               </>
             )}

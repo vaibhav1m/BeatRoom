@@ -55,7 +55,8 @@ exports.getChannel = async (req, res, next) => {
     const channel = await Channel.findById(req.params.id)
       .populate('admin', 'username avatar')
       .populate('members', 'username avatar isOnline')
-      .populate('currentSong');
+      .populate('currentSong')
+      .populate('bannedUsers', 'username avatar');
     if (!channel) return res.status(404).json({ success: false, error: 'Channel not found' });
     const queue = await Queue.findOne({ channel: channel._id })
       .populate('items.song')
@@ -81,7 +82,7 @@ exports.joinChannel = async (req, res, next) => {
       const { password } = req.body;
       if (!password) return res.status(400).json({ success: false, error: 'Password required for private channel' });
       const isMatch = await bcrypt.compare(password, channel.password);
-      if (!isMatch) return res.status(401).json({ success: false, error: 'Incorrect channel password' });
+      if (!isMatch) return res.status(400).json({ success: false, error: 'Incorrect channel password' });
     }
     channel.members.push(req.user._id);
     await channel.save();
@@ -194,7 +195,7 @@ exports.joinByInvite = async (req, res, next) => {
       const { password } = req.body;
       if (!password) return res.status(400).json({ success: false, error: 'Password required', requiresPassword: true });
       const isMatch = await bcrypt.compare(password, channel.password);
-      if (!isMatch) return res.status(401).json({ success: false, error: 'Incorrect channel password' });
+      if (!isMatch) return res.status(400).json({ success: false, error: 'Incorrect channel password' });
     }
     channel.members.push(req.user._id);
     await channel.save();
@@ -224,6 +225,22 @@ exports.toggleControl = async (req, res, next) => {
     channel.allowAllControl = !channel.allowAllControl;
     await channel.save();
     res.json({ success: true, allowAllControl: channel.allowAllControl });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// POST /api/channels/:id/unban/:userId
+exports.unbanUser = async (req, res, next) => {
+  try {
+    const channel = await Channel.findById(req.params.id);
+    if (!channel) return res.status(404).json({ success: false, error: 'Channel not found' });
+    if (channel.admin.toString() !== req.user._id.toString() && req.user.role !== 'superadmin') {
+      return res.status(403).json({ success: false, error: 'Not authorized' });
+    }
+    channel.bannedUsers = channel.bannedUsers.filter(u => u.toString() !== req.params.userId);
+    await channel.save();
+    res.json({ success: true, message: 'User unbanned' });
   } catch (error) {
     next(error);
   }

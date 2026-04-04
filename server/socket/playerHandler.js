@@ -86,6 +86,11 @@ const playerHandler = (io, socket) => {
       socket.emit('error', { message: 'Failed to sync' });
     }
   });
+
+  // Toggle repeat mode — broadcast state to all channel members
+  socket.on('player:repeat', ({ channelId, isRepeat }) => {
+    socket.to(`channel:${channelId}`).emit('player:repeat', { isRepeat });
+  });
 };
 
 module.exports = playerHandler;

@@ -36,15 +36,38 @@ const setupSocketHandlers = (io) => {
       socket.to(`channel:${channelId}`).emit('channel:user-joined', {
         user: { _id: socket.user._id, username: socket.user.username, avatar: socket.user.avatar },
       });
+      io.to(`channel:${channelId}`).emit('chat:system', {
+        text: `${socket.user.username} joined the channel`,
+        type: 'join',
+        timestamp: new Date(),
+      });
       console.log(`  📺 ${socket.user.username} joined channel ${channelId}`);
     });
 
-    socket.on('channel:leave', (channelId) => {
+    socket.on('channel:leave', async (channelId) => {
       socket.leave(`channel:${channelId}`);
       socket.to(`channel:${channelId}`).emit('channel:user-left', {
         userId: socket.user._id, username: socket.user.username,
       });
+      socket.to(`channel:${channelId}`).emit('chat:system', {
+        text: `${socket.user.username} left the channel`,
+        type: 'leave',
+        timestamp: new Date(),
+      });
       socket.currentChannel = null;
+      // Auto-pause if channel has no more online members
+      try {
+        const room = io.sockets.adapter.rooms.get(`channel:${channelId}`);
+        const onlineCount = room ? room.size : 0;
+        if (onlineCount === 0) {
+          const Channel = require('../models/Channel');
+          await Channel.findByIdAndUpdate(channelId, {
+            'playbackState.isPlaying': false,
+            'playbackState.updatedAt': new Date(),
+          });
+          io.to(`channel:${channelId}`).emit('player:state', { isPlaying: false, currentTime: 0 });
+        }
+      } catch (e) {}
     });
 
     // Set up feature handlers
@@ -61,6 +84,17 @@ const setupSocketHandlers = (io) => {
         socket.to(`channel:${socket.currentChannel}`).emit('channel:user-left', {
           userId: socket.user._id, username: socket.user.username,
         });
+        try {
+          const room = io.sockets.adapter.rooms.get(`channel:${socket.currentChannel}`);
+          const onlineCount = room ? room.size : 0;
+          if (onlineCount === 0) {
+            const Channel = require('../models/Channel');
+            await Channel.findByIdAndUpdate(socket.currentChannel, {
+              'playbackState.isPlaying': false,
+              'playbackState.updatedAt': new Date(),
+            });
+          }
+        } catch (e) {}
       }
       console.log(`🔌 ${socket.user.username} disconnected`);
     });

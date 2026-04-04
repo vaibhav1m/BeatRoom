@@ -2,14 +2,18 @@ import { useState, useEffect, useRef } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
-import { useTheme } from '../../context/ThemeContext';
+import { useTheme, THEMES } from '../../context/ThemeContext';
 import { getInitials } from '../../utils/helpers';
 import { getAvatarColor } from '../../utils/constants';
+import MiniPlayer from '../MiniPlayer';
+import { useToast } from '../../context/ToastContext';
+import api from '../../services/api';
 
 const Layout = () => {
   const { user, logout } = useAuth();
   const { socket, connected } = useSocket();
-  const { theme, toggleTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
+  const { toast } = useToast();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -18,6 +22,7 @@ const Layout = () => {
   const [unreadCount, setUnreadCount] = useState(0);
   const [showNotifications, setShowNotifications] = useState(false);
   const notifRef = useRef(null);
+  const [showThemePicker, setShowThemePicker] = useState(false);
 
   const handleSearch = (e) => {
     e.preventDefault();
@@ -37,9 +42,11 @@ const Layout = () => {
     socket.emit('notification:unread-count');
     socket.on('notification:unread-count', (count) => setUnreadCount(count));
     socket.on('notification:list', (list) => setNotifications(list));
+    socket.on('error', (err) => toast.error(err?.message || 'Something went wrong'));
     return () => {
       socket.off('notification:unread-count');
       socket.off('notification:list');
+      socket.off('error');
     };
   }, [socket]);
 
@@ -67,6 +74,7 @@ const Layout = () => {
   ];
 
   return (
+    <>
     <div className="app-layout">
       {/* Sidebar */}
       <aside className={`sidebar ${sidebarOpen ? '' : 'closed'}`}>
@@ -124,7 +132,7 @@ const Layout = () => {
       </aside>
 
       {/* Navbar */}
-      <header className="navbar">
+      <header className={`navbar ${!sidebarOpen ? 'no-sidebar' : ''}`}>
         <div className="navbar-left">
           <button className="btn btn-ghost btn-icon" onClick={() => setSidebarOpen(!sidebarOpen)} style={{ fontSize: '20px' }}>
             ☰
@@ -141,9 +149,49 @@ const Layout = () => {
         </div>
 
         <div className="navbar-right">
-          <button className="btn btn-ghost btn-icon" onClick={toggleTheme} title="Toggle theme">
-            {theme === 'dark' ? '☀️' : '🌙'}
-          </button>
+          <div style={{ position: 'relative' }}>
+            <button
+              className="btn btn-ghost btn-icon"
+              onClick={() => setShowThemePicker(p => !p)}
+              title="Change theme"
+            >
+              {THEMES.find(t => t.id === theme)?.emoji || '🎨'}
+            </button>
+            {showThemePicker && (
+              <>
+                <div style={{ position: 'fixed', inset: 0, zIndex: 99 }} onClick={() => setShowThemePicker(false)} />
+                <div style={{
+                  position: 'absolute', top: '48px', right: 0,
+                  background: 'var(--bg-secondary)', border: 'var(--border-default)',
+                  borderRadius: 'var(--radius-md)', padding: 'var(--space-3)',
+                  zIndex: 200, minWidth: 200, boxShadow: 'var(--shadow-lg)',
+                }}>
+                  <div style={{ fontSize: 'var(--font-size-xs)', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 'var(--space-2)', padding: '0 var(--space-2)' }}>
+                    Color Theme
+                  </div>
+                  {THEMES.map(t => (
+                    <button
+                      key={t.id}
+                      onClick={() => { setTheme(t.id); setShowThemePicker(false); }}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
+                        width: '100%', padding: 'var(--space-2) var(--space-3)',
+                        background: theme === t.id ? 'var(--accent-primary-glow)' : 'none',
+                        border: 'none', borderRadius: 'var(--radius-md)',
+                        color: 'var(--text-primary)', cursor: 'pointer',
+                        fontSize: 'var(--font-size-sm)', fontWeight: theme === t.id ? 700 : 400,
+                      }}
+                    >
+                      <span style={{ width: 14, height: 14, borderRadius: '50%', background: t.preview, display: 'inline-block', flexShrink: 0 }} />
+                      <span style={{ fontSize: 16 }}>{t.emoji}</span>
+                      {t.name}
+                      {theme === t.id && <span style={{ marginLeft: 'auto', color: 'var(--accent-primary)' }}>✓</span>}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
 
           {/* Notification bell */}
           <div style={{ position: 'relative' }} ref={notifRef}>
@@ -212,6 +260,25 @@ const Layout = () => {
                         <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)', marginTop: 2 }}>
                           {new Date(n.createdAt).toLocaleDateString()}
                         </div>
+                        {n.type === 'friend_request' ? (
+                          <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                            <button className="btn btn-primary btn-sm" style={{ fontSize: 11 }}
+                              onClick={async () => {
+                                try {
+                                  await api.post(`/api/users/friend-request/${n.data?.requestId}/respond`, { action: 'accept' });
+                                  toast.success('Friend request accepted!');
+                                  setNotifications(prev => prev.filter(x => x._id !== n._id));
+                                } catch (err) { toast.error('Failed to respond'); }
+                              }}>Accept</button>
+                            <button className="btn btn-secondary btn-sm" style={{ fontSize: 11 }}
+                              onClick={async () => {
+                                try {
+                                  await api.post(`/api/users/friend-request/${n.data?.requestId}/respond`, { action: 'reject' });
+                                  setNotifications(prev => prev.filter(x => x._id !== n._id));
+                                } catch (err) { toast.error('Failed to respond'); }
+                              }}>Decline</button>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   ))
@@ -251,12 +318,14 @@ const Layout = () => {
       </header>
 
       {/* Main Content */}
-      <main className="main-content">
+      <main className={`main-content ${!sidebarOpen ? 'no-sidebar' : ''}`}>
         <div className="page-enter">
           <Outlet />
         </div>
       </main>
     </div>
+    <MiniPlayer />
+    </>
   );
 };
 

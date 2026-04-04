@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
+import { useToast } from '../context/ToastContext';
+import { usePlayer } from '../context/PlayerContext';
 import api from '../services/api';
 import { formatTimeAgo, getInitials, formatDuration } from '../utils/helpers';
 import { getAvatarColor, EMOJIS } from '../utils/constants';
@@ -10,6 +12,8 @@ const ChannelPage = () => {
   const { channelId } = useParams();
   const { user } = useAuth();
   const { socket, joinChannel, leaveChannel, setActiveChannelId } = useSocket();
+  const { toast } = useToast();
+  const { setCurrentSong: setGlobalSong, setIsPlaying: setGlobalPlaying, setCurrentChannelId: setGlobalChannelId, setChannelName: setGlobalChannelName } = usePlayer();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -80,9 +84,20 @@ const ChannelPage = () => {
   useEffect(() => { currentSongRef.current = currentSong; }, [currentSong]);
   useEffect(() => { socketRef.current = socket; }, [socket]);
 
+  // Keep global PlayerContext in sync for mini player
+  useEffect(() => { setGlobalSong(currentSong); }, [currentSong]);
+  useEffect(() => { setGlobalPlaying(isPlaying); }, [isPlaying]);
+
   // Persist volume to localStorage
   useEffect(() => { localStorage.setItem('beatroom_volume', volume); }, [volume]);
   useEffect(() => { localStorage.setItem('beatroom_muted', isMuted); }, [isMuted]);
+
+  // Re-request sync once YT API becomes ready (covers late-load race condition)
+  useEffect(() => {
+    if (ytApiReady && socketRef.current && channelId) {
+      socketRef.current.emit('player:request-sync', { channelId });
+    }
+  }, [ytApiReady]);
 
   // Load YouTube IFrame API once
   useEffect(() => {
@@ -174,6 +189,8 @@ const ChannelPage = () => {
       try {
         const res = await api.get(`/api/channels/${channelId}`);
         setChannel(res.data.channel);
+        setGlobalChannelId(res.data.channel._id);
+        setGlobalChannelName(res.data.channel.name);
         setQueue(res.data.queue);
         setCurrentSong(res.data.channel.currentSong);
         setIsPlaying(res.data.channel.playbackState?.isPlaying || false);
@@ -199,6 +216,9 @@ const ChannelPage = () => {
     socket.emit('chat:history', { channelId });
     socket.emit('player:request-sync', { channelId });
 
+    const handleSocketError = (err) => toast.error(err?.message || 'Something went wrong');
+    socket.on('error', handleSocketError);
+
     const handleMessage = (msg) => setMessages(prev => [...prev, msg]);
     const handleHistory = (msgs) => setMessages(msgs);
     const handleReaction = ({ messageId, reactions }) => {
@@ -209,21 +229,43 @@ const ChannelPage = () => {
     };
     const handlePlayerState = ({ isPlaying: playing, currentTime: ct, song }) => {
       setIsPlaying(playing);
+      setCurrentTime(ct || 0);
+
+      // Detect if this sync carries a different song (new YT player will be created)
+      const songChanging = song !== undefined && song !== null &&
+        currentSongRef.current?._id &&
+        song._id !== currentSongRef.current._id;
+
       if (song !== undefined) {
-        if (song && currentSongRef.current && song._id !== currentSongRef.current._id) {
+        if (songChanging) {
           setSongHistory(prev => [...prev.slice(-9), currentSongRef.current]);
         }
         setCurrentSong(song);
       }
-      setCurrentTime(ct || 0);
+
+      // If the song is changing, the YT useEffect will destroy+recreate the player.
+      // Pre-store sync data so the new player's onReady applies it immediately.
+      if (songChanging) {
+        pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
+        return;
+      }
+
+      // Same song (or no song in payload) — try to control the existing player
       if (ytPlayerInstance.current) {
         try {
-          ytPlayerInstance.current.seekTo(ct || 0, true);
-          if (playing) ytPlayerInstance.current.playVideo();
-          else ytPlayerInstance.current.pauseVideo();
-        } catch (e) {}
+          const state = ytPlayerInstance.current.getPlayerState?.();
+          if (state === -1 || state == null) {
+            // UNSTARTED — onReady hasn't fired yet; store for it
+            pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
+          } else {
+            ytPlayerInstance.current.seekTo(ct || 0, true);
+            if (playing) ytPlayerInstance.current.playVideo();
+            else ytPlayerInstance.current.pauseVideo();
+          }
+        } catch (e) {
+          pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
+        }
       } else {
-        // Player not created yet — store sync to apply in onReady
         pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
       }
     };
@@ -238,6 +280,7 @@ const ChannelPage = () => {
       }
     };
     const handleQueueUpdate = (q) => setQueue(q);
+    const handleRepeatSync = ({ isRepeat: r }) => setIsRepeat(r);
     const handleUserJoined = ({ user: joinedUser }) => {
       setChannel(prev => prev ? { ...prev, members: [...(prev.members || []), joinedUser] } : prev);
       setOnlineUserIds(prev => new Set([...prev, joinedUser._id]));
@@ -246,6 +289,7 @@ const ChannelPage = () => {
       setChannel(prev => prev ? { ...prev, members: (prev.members || []).filter(m => m._id !== userId) } : prev);
       setOnlineUserIds(prev => { const s = new Set(prev); s.delete(userId); return s; });
     };
+    const handleSystemMsg = (msg) => setMessages(prev => [...prev, { ...msg, _id: `sys-${Date.now()}`, isSystem: true }]);
     const handleTyping = ({ username }) => {
       setTyping(prev => [...new Set([...prev, username])]);
     };
@@ -260,13 +304,16 @@ const ChannelPage = () => {
     socket.on('player:state', handlePlayerState);
     socket.on('player:seek', handlePlayerSeek);
     socket.on('queue:updated', handleQueueUpdate);
+    socket.on('player:repeat', handleRepeatSync);
     socket.on('channel:user-joined', handleUserJoined);
     socket.on('channel:user-left', handleUserLeft);
+    socket.on('chat:system', handleSystemMsg);
     socket.on('chat:typing', handleTyping);
     socket.on('chat:stop-typing', handleStopTyping);
 
     return () => {
       leaveChannel(channelId);
+      socket.off('error', handleSocketError);
       socket.off('chat:message', handleMessage);
       socket.off('chat:history', handleHistory);
       socket.off('chat:reaction-update', handleReaction);
@@ -274,8 +321,10 @@ const ChannelPage = () => {
       socket.off('player:state', handlePlayerState);
       socket.off('player:seek', handlePlayerSeek);
       socket.off('queue:updated', handleQueueUpdate);
+      socket.off('player:repeat', handleRepeatSync);
       socket.off('channel:user-joined', handleUserJoined);
       socket.off('channel:user-left', handleUserLeft);
+      socket.off('chat:system', handleSystemMsg);
       socket.off('chat:typing', handleTyping);
       socket.off('chat:stop-typing', handleStopTyping);
     };
@@ -527,6 +576,39 @@ const ChannelPage = () => {
         {/* Left: Player + Queue */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', minHeight: 0, overflowY: 'auto' }}>
 
+          {/* Solo mode banner */}
+          {channel?.members?.length <= 1 && (
+            <div style={{
+              padding: 'var(--space-3) var(--space-5)',
+              background: 'rgba(124, 58, 237, 0.08)',
+              border: '1px solid rgba(124, 58, 237, 0.2)',
+              borderRadius: 'var(--radius-md)',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              gap: 'var(--space-3)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                <span style={{ fontSize: 24 }}>🎧</span>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 'var(--font-size-sm)' }}>You're listening solo</div>
+                  <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>
+                    Music is more fun with friends — invite someone to jam together! 🎶
+                  </div>
+                </div>
+              </div>
+              <button
+                className="btn btn-primary btn-sm"
+                style={{ flexShrink: 0 }}
+                onClick={() => {
+                  const url = `${window.location.origin}/join/${channel?.inviteCode}`;
+                  navigator.clipboard.writeText(url);
+                  alert('Invite link copied! 🔗 Share it with friends');
+                }}
+              >
+                🔗 Invite Friends
+              </button>
+            </div>
+          )}
+
           {/* Player */}
           <div className="glass-card" style={{ padding: 'var(--space-5)' }}>
             {currentSong ? (
@@ -607,7 +689,11 @@ const ChannelPage = () => {
                   {/* Right: Repeat */}
                   <button
                     className={`player-ctrl-btn player-mode-btn${isRepeat ? ' player-ctrl-active' : ''}`}
-                    onClick={() => setIsRepeat(r => !r)}
+                    onClick={() => {
+                      const next = !isRepeat;
+                      setIsRepeat(next);
+                      socket?.emit('player:repeat', { channelId, isRepeat: next });
+                    }}
                     title={isRepeat ? 'Repeat: On' : 'Repeat: Off'}
                   >🔁 <span className="player-mode-label">Repeat</span></button>
                 </div>
@@ -664,7 +750,14 @@ const ChannelPage = () => {
                     style={{ cursor: canControl ? 'pointer' : 'default' }}
                   >
                     <div className="queue-item-title">{item.song?.title}</div>
-                    <div className="queue-item-artist">{item.song?.artist} • {item.addedBy?.username}</div>
+                    <div className="queue-item-artist">
+                      {item.song?.artist}
+                      {item.addedBy?.username && (
+                        <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>
+                          • added by {item.addedBy.username}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div className="queue-item-votes">
                     <button className={`queue-vote-btn${item.upvotes?.includes(user?._id) ? ' upvoted' : ''}`}
@@ -747,6 +840,36 @@ const ChannelPage = () => {
                   </div>
                 );
               })}
+              {isAdmin && channel?.bannedUsers?.length > 0 && (
+                <div style={{ marginTop: 'var(--space-4)', borderTop: 'var(--border-default)', paddingTop: 'var(--space-3)' }}>
+                  <div style={{ fontSize: 'var(--font-size-xs)', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 'var(--space-2)' }}>
+                    Banned Users
+                  </div>
+                  {channel.bannedUsers.map(banned => (
+                    <div key={banned._id} style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      padding: 'var(--space-2) var(--space-3)', borderRadius: 'var(--radius-md)',
+                      background: 'rgba(239,68,68,0.06)', marginBottom: 'var(--space-1)',
+                    }}>
+                      <span style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)' }}>
+                        🚫 {banned.username}
+                      </span>
+                      <button className="btn btn-ghost btn-sm" style={{ color: 'var(--accent-success)', fontSize: 11 }}
+                        onClick={async () => {
+                          try {
+                            await api.post(`/api/channels/${channelId}/unban/${banned._id}`);
+                            setChannel(prev => ({ ...prev, bannedUsers: prev.bannedUsers.filter(b => b._id !== banned._id) }));
+                            toast.success(`${banned.username} has been unbanned`);
+                          } catch (err) {
+                            toast.error(err.response?.data?.error || 'Failed to unban');
+                          }
+                        }}>
+                        Unban
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -754,45 +877,57 @@ const ChannelPage = () => {
           {rightTab === 'chat' && (<>
           <div className="chat-messages" style={{ flex: 1, overflow: 'auto' }}>
             {messages.map((msg) => (
-              <div key={msg._id} className="chat-message">
-                <div className="avatar avatar-sm avatar-placeholder"
-                  style={{ background: getAvatarColor(msg.sender?.username || ''), fontSize: '11px' }}>
-                  {getInitials(msg.sender?.username || '')}
+              msg.isSystem ? (
+                <div key={msg._id} style={{
+                  textAlign: 'center', padding: '4px 16px', margin: '4px 0',
+                  fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)',
+                  fontStyle: 'italic',
+                }}>
+                  <span style={{ padding: '2px 10px', background: 'var(--surface-glass)', borderRadius: 'var(--radius-full)' }}>
+                    {msg.text}
+                  </span>
                 </div>
-                <div className="chat-message-content">
-                  <div className="chat-message-header">
-                    <span className="chat-message-username">{msg.sender?.username}</span>
-                    <span className="chat-message-time">{formatTimeAgo(msg.createdAt)}</span>
+              ) : (
+                <div key={msg._id} className="chat-message">
+                  <div className="avatar avatar-sm avatar-placeholder"
+                    style={{ background: getAvatarColor(msg.sender?.username || ''), fontSize: '11px' }}>
+                    {getInitials(msg.sender?.username || '')}
                   </div>
-                  {msg.replyTo && (
-                    <div style={{ padding: '4px 8px', background: 'var(--surface-glass)', borderLeft: '2px solid var(--accent-primary)', borderRadius: '4px', marginBottom: '4px', fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}>
-                      ↩ {msg.replyTo.content?.substring(0, 60)}
+                  <div className="chat-message-content">
+                    <div className="chat-message-header">
+                      <span className="chat-message-username">{msg.sender?.username}</span>
+                      <span className="chat-message-time">{formatTimeAgo(msg.createdAt)}</span>
                     </div>
-                  )}
-                  <div className="chat-message-text">{msg.content}</div>
-                  {msg.reactions?.length > 0 && (
-                    <div className="chat-message-reactions">
-                      {msg.reactions.map((r, i) => (
-                        <button key={i} className={`chat-reaction ${r.users?.includes(user?._id) ? 'active' : ''}`}
-                          onClick={() => toggleReaction(msg._id, r.emoji)}>
-                          {r.emoji} {r.users?.length}
-                        </button>
+                    {msg.replyTo && (
+                      <div style={{ padding: '4px 8px', background: 'var(--surface-glass)', borderLeft: '2px solid var(--accent-primary)', borderRadius: '4px', marginBottom: '4px', fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}>
+                        ↩ {msg.replyTo.content?.substring(0, 60)}
+                      </div>
+                    )}
+                    <div className="chat-message-text">{msg.content}</div>
+                    {msg.reactions?.length > 0 && (
+                      <div className="chat-message-reactions">
+                        {msg.reactions.map((r, i) => (
+                          <button key={i} className={`chat-reaction ${r.users?.includes(user?._id) ? 'active' : ''}`}
+                            onClick={() => toggleReaction(msg._id, r.emoji)}>
+                            {r.emoji} {r.users?.length}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', gap: '4px', marginTop: '4px', opacity: 0 }}
+                      className="msg-actions"
+                      onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
+                      onMouseLeave={(e) => e.currentTarget.style.opacity = 0}>
+                      <button className="btn btn-ghost" style={{ padding: '2px 6px', fontSize: '12px' }}
+                        onClick={() => setReplyTo(msg)}>↩</button>
+                      {EMOJIS.slice(0, 5).map(emoji => (
+                        <button key={emoji} className="btn btn-ghost" style={{ padding: '2px 4px', fontSize: '14px' }}
+                          onClick={() => toggleReaction(msg._id, emoji)}>{emoji}</button>
                       ))}
                     </div>
-                  )}
-                  <div style={{ display: 'flex', gap: '4px', marginTop: '4px', opacity: 0 }}
-                    className="msg-actions"
-                    onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
-                    onMouseLeave={(e) => e.currentTarget.style.opacity = 0}>
-                    <button className="btn btn-ghost" style={{ padding: '2px 6px', fontSize: '12px' }}
-                      onClick={() => setReplyTo(msg)}>↩</button>
-                    {EMOJIS.slice(0, 5).map(emoji => (
-                      <button key={emoji} className="btn btn-ghost" style={{ padding: '2px 4px', fontSize: '14px' }}
-                        onClick={() => toggleReaction(msg._id, emoji)}>{emoji}</button>
-                    ))}
                   </div>
                 </div>
-              </div>
+              )
             ))}
             <div ref={chatEndRef} />
           </div>

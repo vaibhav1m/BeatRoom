@@ -76,7 +76,7 @@
   border-radius: var(--radius-xl);
   position: relative;
   z-index: 1;
-  animation: modal-pop 0.4s var(--transition-spring);
+  animation: auth-card-enter 0.4s var(--transition-spring) both;
 }
 
 .auth-logo {
@@ -246,6 +246,10 @@
   flex-direction: column;
   z-index: var(--z-sticky);
   transition: transform var(--transition-base);
+}
+
+.sidebar.closed {
+  transform: translateX(-100%);
 }
 
 .sidebar-header {
@@ -431,6 +435,16 @@
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.5; transform: scale(1.2); }
+}
+
+@keyframes auth-card-enter {
+  from { transform: scale(0.95) translateY(8px); opacity: 0; }
+  to   { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+@keyframes toast-in {
+  from { transform: translateX(30px); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
 }
 
 /* ============================================

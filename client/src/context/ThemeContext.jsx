@@ -8,8 +8,17 @@ export const useTheme = () => {
   return context;
 };
 
+export const THEMES = [
+  { id: 'dark',     name: 'Dark',     emoji: '🌑', preview: '#7c3aed' },
+  { id: 'light',    name: 'Light',    emoji: '☀️',  preview: '#7c3aed' },
+  { id: 'midnight', name: 'Midnight', emoji: '🌊', preview: '#06b6d4' },
+  { id: 'sunset',   name: 'Sunset',   emoji: '🌅', preview: '#f97316' },
+  { id: 'forest',   name: 'Forest',   emoji: '🌿', preview: '#10b981' },
+  { id: 'galaxy',   name: 'Galaxy',   emoji: '💜', preview: '#ec4899' },
+];
+
 export const ThemeProvider = ({ children }) => {
-  const [theme, setTheme] = useState(() => {
+  const [theme, setThemeState] = useState(() => {
     return localStorage.getItem('beatroom_theme') || 'dark';
   });
 
@@ -18,12 +27,11 @@ export const ThemeProvider = ({ children }) => {
     localStorage.setItem('beatroom_theme', theme);
   }, [theme]);
 
-  const toggleTheme = () => {
-    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
-  };
+  const setTheme = (id) => setThemeState(id);
+  const toggleTheme = () => setThemeState(prev => prev === 'dark' ? 'light' : 'dark');
 
   return (
-    <ThemeContext.Provider value={{ theme, toggleTheme }}>
+    <ThemeContext.Provider value={{ theme, setTheme, toggleTheme }}>
       {children}
     </ThemeContext.Provider>
   );

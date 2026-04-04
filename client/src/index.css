@@ -101,6 +101,142 @@
 }
 
 /* ============================================
+   Light Theme
+   ============================================ */
+[data-theme="light"] {
+  --bg-primary: #f4f4f9;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #eaeaf3;
+  --bg-elevated: #ffffff;
+  --bg-hover: #e4e4f0;
+  --bg-active: #d8d8ee;
+  --surface-glass: rgba(0, 0, 0, 0.04);
+  --surface-glass-hover: rgba(0, 0, 0, 0.07);
+  --surface-glass-border: rgba(0, 0, 0, 0.1);
+  --text-primary: #1a1a2e;
+  --text-secondary: #4a4a6a;
+  --text-tertiary: #7a7a9a;
+  --text-muted: #aaaacc;
+  --accent-primary: #7c3aed;
+  --accent-primary-hover: #6d28d9;
+  --accent-primary-glow: rgba(124, 58, 237, 0.15);
+  --border-default: 1px solid rgba(0, 0, 0, 0.1);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.12);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.16);
+  --gradient-dark: linear-gradient(180deg, #f4f4f9 0%, #ffffff 100%);
+}
+
+/* ============================================
+   Midnight Theme (deep blue + cyan)
+   ============================================ */
+[data-theme="midnight"] {
+  --bg-primary: #050514;
+  --bg-secondary: #0a0a20;
+  --bg-tertiary: #0f0f2d;
+  --bg-elevated: #14143a;
+  --bg-hover: #1a1a44;
+  --bg-active: #20204e;
+  --accent-primary: #06b6d4;
+  --accent-primary-hover: #22d3ee;
+  --accent-primary-glow: rgba(6, 182, 212, 0.25);
+  --gradient-primary: linear-gradient(135deg, #06b6d4 0%, #6366f1 100%);
+  --shadow-glow: 0 0 20px rgba(6, 182, 212, 0.25);
+  --shadow-glow-lg: 0 0 40px rgba(6, 182, 212, 0.25);
+}
+
+/* ============================================
+   Sunset Theme (dark warm + orange)
+   ============================================ */
+[data-theme="sunset"] {
+  --bg-primary: #0f0804;
+  --bg-secondary: #1a100a;
+  --bg-tertiary: #241510;
+  --bg-elevated: #2e1a14;
+  --bg-hover: #38201a;
+  --bg-active: #422620;
+  --accent-primary: #f97316;
+  --accent-primary-hover: #fb923c;
+  --accent-primary-glow: rgba(249, 115, 22, 0.25);
+  --gradient-primary: linear-gradient(135deg, #f97316 0%, #f43f5e 100%);
+  --shadow-glow: 0 0 20px rgba(249, 115, 22, 0.25);
+  --shadow-glow-lg: 0 0 40px rgba(249, 115, 22, 0.25);
+}
+
+/* ============================================
+   Forest Theme (dark + emerald)
+   ============================================ */
+[data-theme="forest"] {
+  --bg-primary: #030f07;
+  --bg-secondary: #071a0d;
+  --bg-tertiary: #0c2414;
+  --bg-elevated: #112e1b;
+  --bg-hover: #163822;
+  --bg-active: #1b4228;
+  --accent-primary: #10b981;
+  --accent-primary-hover: #34d399;
+  --accent-primary-glow: rgba(16, 185, 129, 0.25);
+  --gradient-primary: linear-gradient(135deg, #10b981 0%, #06b6d4 100%);
+  --shadow-glow: 0 0 20px rgba(16, 185, 129, 0.25);
+  --shadow-glow-lg: 0 0 40px rgba(16, 185, 129, 0.25);
+}
+
+/* ============================================
+   Galaxy Theme (dark + magenta/pink)
+   ============================================ */
+[data-theme="galaxy"] {
+  --bg-primary: #08040f;
+  --bg-secondary: #100818;
+  --bg-tertiary: #180c22;
+  --bg-elevated: #20102c;
+  --bg-hover: #281436;
+  --bg-active: #301840;
+  --accent-primary: #ec4899;
+  --accent-primary-hover: #f472b6;
+  --accent-primary-glow: rgba(236, 72, 153, 0.25);
+  --gradient-primary: linear-gradient(135deg, #ec4899 0%, #7c3aed 100%);
+  --shadow-glow: 0 0 20px rgba(236, 72, 153, 0.25);
+  --shadow-glow-lg: 0 0 40px rgba(236, 72, 153, 0.25);
+}
+
+/* Light theme surface overrides */
+[data-theme="light"] .glass-card,
+[data-theme="light"] .channel-card,
+[data-theme="light"] .stat-card {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="light"] .sidebar {
+  background: #ffffff;
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="light"] .navbar {
+  background: rgba(255, 255, 255, 0.9);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="light"] .input-field {
+  background: #f4f4f9;
+  border-color: rgba(0, 0, 0, 0.12);
+  color: #1a1a2e;
+}
+
+[data-theme="light"] .btn-secondary {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.12);
+  color: #1a1a2e;
+}
+
+[data-theme="light"] .chat-container,
+[data-theme="light"] .queue-container {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+/* ============================================
    Global Reset & Base
    ============================================ */
 *,
@@ -498,8 +634,8 @@ ul, ol {
 }
 
 @keyframes modal-pop {
-  from { transform: translate(-50%, -50%) scale(0.9); opacity: 0; }
-  to { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+  from { transform: scale(0.92); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
 }
 
 /* ============================================

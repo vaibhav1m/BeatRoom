@@ -12,11 +12,16 @@ const DashboardPage = () => {
   const [channels, setChannels] = useState([]);
   const [stats, setStats] = useState(null);
   const [showCreateChannel, setShowCreateChannel] = useState(false);
-  const [newChannel, setNewChannel] = useState({ name: '', description: '', type: 'public', password: '' });
+  const [newChannel, setNewChannel] = useState({ name: '', description: '', type: 'public', password: '', tags: [] });
   const [joinPassword, setJoinPassword] = useState('');
   const [joiningChannel, setJoiningChannel] = useState(null);
+  const [selectedTag, setSelectedTag] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [myPlaylists, setMyPlaylists] = useState([]);
+  const [songToSave, setSongToSave] = useState(null);
+  const [savingToPlaylist, setSavingToPlaylist] = useState(null);
+  const [saveSuccess, setSaveSuccess] = useState(null);
 
   useEffect(() => {
     fetchData();
@@ -46,7 +51,7 @@ const DashboardPage = () => {
       const res = await api.post('/api/channels', newChannel);
       setChannels([res.data.channel, ...channels]);
       setShowCreateChannel(false);
-      setNewChannel({ name: '', description: '', type: 'public', password: '' });
+      setNewChannel({ name: '', description: '', type: 'public', password: '', tags: [] });
       navigate(`/channel/${res.data.channel._id}`);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to create channel');
@@ -77,6 +82,27 @@ const DashboardPage = () => {
       navigate(`/channel/${joiningChannel._id}`);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to join');
+    }
+  };
+
+  const fetchMyPlaylists = async () => {
+    if (myPlaylists.length > 0) return;
+    try {
+      const res = await api.get('/api/playlists/my');
+      setMyPlaylists(res.data.playlists || []);
+    } catch (err) { console.error(err); }
+  };
+
+  const handleSaveToPlaylist = async (playlistId) => {
+    if (!songToSave?._id) return;
+    setSavingToPlaylist(playlistId);
+    try {
+      await api.post(`/api/playlists/${playlistId}/songs`, { songId: songToSave._id });
+      setSaveSuccess(playlistId);
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed to save');
+    } finally {
+      setSavingToPlaylist(null);
     }
   };
 
@@ -118,6 +144,27 @@ const DashboardPage = () => {
         </button>
       </div>
 
+      {/* Tag filter chips */}
+      {(() => {
+        const allTags = [...new Set(channels.flatMap(c => c.tags || []))];
+        if (!allTags.length) return null;
+        return (
+          <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', marginBottom: 'var(--space-4)' }}>
+            <button
+              className={`btn btn-sm ${!selectedTag ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setSelectedTag('')}
+            >All</button>
+            {allTags.map(tag => (
+              <button
+                key={tag}
+                className={`btn btn-sm ${selectedTag === tag ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setSelectedTag(prev => prev === tag ? '' : tag)}
+              >#{tag}</button>
+            ))}
+          </div>
+        );
+      })()}
+
       {loading ? (
         <div className="channel-grid">
           {[1, 2, 3].map(i => (
@@ -126,7 +173,7 @@ const DashboardPage = () => {
         </div>
       ) : (
         <div className="channel-grid">
-          {channels.map(channel => {
+          {(selectedTag ? channels.filter(c => c.tags?.includes(selectedTag)) : channels).map(channel => {
             const isMember = channel.members?.some(m => m._id === user._id);
             return (
               <div key={channel._id} className="channel-card" onClick={() => handleJoinChannel(channel)}>
@@ -139,9 +186,17 @@ const DashboardPage = () => {
                   <div className="channel-card-members">
                     👥 {channel.members?.length || 0} members
                   </div>
-                  {channel.currentSong && (
+                  {channel.currentSong && channel.playbackState?.isPlaying ? (
                     <div className="channel-card-now-playing">
-                      <div className="pulse" /> Now playing
+                      <div className="pulse" /> 🎵 Now playing
+                    </div>
+                  ) : channel.currentSong ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}>
+                      ⏸ Paused
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)' }}>
+                      🎧 Empty queue
                     </div>
                   )}
                   {isMember && (
@@ -186,11 +241,63 @@ const DashboardPage = () => {
                   <div style={{ fontWeight: 600, fontSize: 'var(--font-size-sm)' }}>{song.title}</div>
                   <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>{song.artist}</div>
                 </div>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  title="Save to playlist"
+                  onClick={(e) => { e.stopPropagation(); setSongToSave(song); setSaveSuccess(null); fetchMyPlaylists(); }}
+                  style={{ flexShrink: 0 }}
+                >💾</button>
                 <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}>▶ {song.playCount} plays</span>
               </div>
             ))}
           </div>
         </div>
+      )}
+
+      {/* Save to Playlist Modal */}
+      {songToSave && (
+        <>
+          <div className="modal-backdrop" onClick={() => { setSongToSave(null); setSaveSuccess(null); }} />
+          <div className="modal" style={{ maxWidth: 440 }}>
+            <div className="modal-header">
+              <h2>💾 Save to Playlist</h2>
+              <button className="modal-close" onClick={() => { setSongToSave(null); setSaveSuccess(null); }}>✕</button>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-4)', padding: 'var(--space-3)', background: 'var(--surface-glass)', borderRadius: 'var(--radius-md)' }}>
+              {songToSave.thumbnail && <img src={songToSave.thumbnail} alt="" style={{ width: 44, height: 44, borderRadius: 'var(--radius-sm)', objectFit: 'cover' }} />}
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 'var(--font-size-sm)' }}>{songToSave.title}</div>
+                <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>{songToSave.artist}</div>
+              </div>
+            </div>
+            {myPlaylists.length === 0 ? (
+              <div style={{ padding: 'var(--space-6)', textAlign: 'center', color: 'var(--text-muted)' }}>
+                No playlists yet. <button className="btn btn-ghost btn-sm" onClick={() => { setSongToSave(null); navigate('/playlist'); }}>Create one</button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', maxHeight: 300, overflowY: 'auto' }}>
+                {myPlaylists.map(pl => {
+                  const saved = saveSuccess === pl._id;
+                  return (
+                    <div key={pl._id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-3)', borderRadius: 'var(--radius-md)', background: 'var(--surface-glass)' }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 600, fontSize: 'var(--font-size-sm)' }}>{pl.name}</div>
+                        <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>{pl.songs?.length || 0} songs</div>
+                      </div>
+                      <button
+                        className={`btn btn-sm ${saved ? 'btn-secondary' : 'btn-primary'}`}
+                        disabled={savingToPlaylist === pl._id || saved}
+                        onClick={() => handleSaveToPlaylist(pl._id)}
+                      >
+                        {saved ? '✓ Saved' : savingToPlaylist === pl._id ? 'Saving...' : '+ Save'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </>
       )}
 
       {/* Create Channel Modal */}
@@ -231,6 +338,15 @@ const DashboardPage = () => {
                     value={newChannel.password} onChange={(e) => setNewChannel({ ...newChannel, password: e.target.value })} />
                 </div>
               )}
+              <div className="form-group">
+                <label>Tags <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>(comma-separated, e.g. pop, chill)</span></label>
+                <input
+                  className="input-field"
+                  placeholder="pop, chill, hiphop"
+                  value={newChannel.tags?.join(', ') || ''}
+                  onChange={(e) => setNewChannel({ ...newChannel, tags: e.target.value.split(',').map(t => t.trim()).filter(Boolean) })}
+                />
+              </div>
               <button type="submit" className="btn btn-primary btn-lg" style={{ width: '100%' }}>🚀 Create Channel</button>
             </form>
           </div>

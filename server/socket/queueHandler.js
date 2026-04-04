@@ -16,6 +16,13 @@ const queueHandler = (io, socket) => {
       if (!queue) {
         queue = await Queue.create({ channel: channelId, items: [] });
       }
+      // Dedupe: check if this song is already in the queue
+      const alreadyInQueue = queue.items.some(
+        item => item.song?.toString() === song._id.toString()
+      );
+      if (alreadyInQueue) {
+        return socket.emit('error', { message: 'This song is already in the queue', code: 'DUPLICATE_SONG' });
+      }
       queue.items.push({ song: song._id, addedBy: socket.user._id });
       await queue.save();
       const populated = await Queue.findById(queue._id)
@@ -35,6 +42,11 @@ const queueHandler = (io, socket) => {
           controlledBy: 'system',
         });
       }
+      io.to(`channel:${channelId}`).emit('chat:system', {
+        text: `${socket.user.username} added "${song.title}" to the queue`,
+        type: 'song_added',
+        timestamp: new Date(),
+      });
     } catch (err) {
       console.error('Queue add error:', err);
       socket.emit('error', { message: 'Failed to add to queue' });

@@ -3,6 +3,8 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { SocketProvider } from './context/SocketContext';
 import { PlayerProvider } from './context/PlayerContext';
 import { ThemeProvider } from './context/ThemeContext';
+import { ToastProvider } from './context/ToastContext';
+import Toast from './components/Toast';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DashboardPage from './pages/DashboardPage';
@@ -40,37 +42,42 @@ const PublicRoute = ({ children }) => {
 
 const AppRoutes = () => {
   return (
-    <Routes>
-      <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
-      <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
-      <Route path="/join/:inviteCode" element={<ProtectedRoute><JoinPage /></ProtectedRoute>} />
-      <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-        <Route index element={<Navigate to="/dashboard" replace />} />
-        <Route path="dashboard" element={<DashboardPage />} />
-        <Route path="channel/:channelId" element={<ChannelPage />} />
-        <Route path="profile/:userId?" element={<ProfilePage />} />
-        <Route path="playlist/:playlistId?" element={<PlaylistPage />} />
-        <Route path="search" element={<SearchPage />} />
-        <Route path="admin" element={<AdminPage />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
+        <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
+        <Route path="/join/:inviteCode" element={<ProtectedRoute><JoinPage /></ProtectedRoute>} />
+        <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+          <Route index element={<Navigate to="/dashboard" replace />} />
+          <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="channel/:channelId" element={<ChannelPage />} />
+          <Route path="profile/:userId?" element={<ProfilePage />} />
+          <Route path="playlist/:playlistId?" element={<PlaylistPage />} />
+          <Route path="search" element={<SearchPage />} />
+          <Route path="admin" element={<AdminPage />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      </Routes>
+      <Toast />
+    </>
   );
 };
 
 function App() {
   return (
-    <ThemeProvider>
-      <AuthProvider>
-        <SocketProvider>
-          <PlayerProvider>
-            <Router>
-              <AppRoutes />
-            </Router>
-          </PlayerProvider>
-        </SocketProvider>
-      </AuthProvider>
-    </ThemeProvider>
+    <ToastProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <SocketProvider>
+            <PlayerProvider>
+              <Router>
+                <AppRoutes />
+              </Router>
+            </PlayerProvider>
+          </SocketProvider>
+        </AuthProvider>
+      </ThemeProvider>
+    </ToastProvider>
   );
 }
 
