@@ -230,6 +230,26 @@ exports.toggleControl = async (req, res, next) => {
   }
 };
 
+// POST /api/channels/:id/toggle-view-mode
+// io is injected via req.app.get('io') set in server.js
+exports.toggleViewMode = async (req, res, next) => {
+  try {
+    const channel = await Channel.findById(req.params.id);
+    if (!channel) return res.status(404).json({ success: false, error: 'Channel not found' });
+    if (channel.admin.toString() !== req.user._id.toString() && req.user.role !== 'superadmin') {
+      return res.status(403).json({ success: false, error: 'Not authorized' });
+    }
+    channel.viewMode = channel.viewMode === 'video' ? 'audio' : 'video';
+    await channel.save();
+    // Broadcast to all channel members so everyone switches immediately
+    const io = req.app.get('io');
+    if (io) io.to(`channel:${channel._id}`).emit('channel:view-mode', { viewMode: channel.viewMode });
+    res.json({ success: true, viewMode: channel.viewMode });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // POST /api/channels/:id/unban/:userId
 exports.unbanUser = async (req, res, next) => {
   try {

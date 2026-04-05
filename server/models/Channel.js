@@ -54,6 +54,11 @@ const channelSchema = new mongoose.Schema({
     type: Boolean,
     default: true,
   },
+  viewMode: {
+    type: String,
+    enum: ['video', 'audio'],
+    default: 'video',
+  },
   tags: [{
     type: String,
     trim: true,

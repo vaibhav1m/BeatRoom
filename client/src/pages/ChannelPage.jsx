@@ -52,8 +52,9 @@ const ChannelPage = () => {
   const [ytApiReady, setYtApiReady] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekDraft, setSeekDraft] = useState(0);
-  // Audio-only / video mode
-  const [viewMode, setViewMode] = useState(() => localStorage.getItem('beatroom_view_mode') || 'video');
+  // viewMode is channel-level (admin sets it, all members follow)
+  const [viewMode, setViewMode] = useState('video');
+  const [isSyncing, setIsSyncing] = useState(false);
   // Sync loading state — show spinner until first player:state is received
   const [syncReady, setSyncReady] = useState(false);
 
@@ -95,10 +96,9 @@ const ChannelPage = () => {
   useEffect(() => { setGlobalSong(currentSong); }, [currentSong]);
   useEffect(() => { setGlobalPlaying(isPlaying); }, [isPlaying]);
 
-  // Persist volume + viewMode to localStorage
+  // Persist volume to localStorage
   useEffect(() => { localStorage.setItem('beatroom_volume', volume); }, [volume]);
   useEffect(() => { localStorage.setItem('beatroom_muted', isMuted); }, [isMuted]);
-  useEffect(() => { localStorage.setItem('beatroom_view_mode', viewMode); }, [viewMode]);
 
   // Note: sync is now pushed by the server on channel:join — no client pull needed here
 
@@ -153,7 +153,12 @@ const ChannelPage = () => {
 
           const sync = pendingSyncRef.current;
           if (sync) {
-            e.target.seekTo(sync.currentTime, true);
+            // Add seek offset to compensate for YouTube's buffer/seek delay (~1.2s)
+            // so the video starts playing at approximately the same position as other users
+            const seekTime = sync.isPlaying
+              ? sync.currentTime + 1.2
+              : sync.currentTime;
+            e.target.seekTo(seekTime, true);
             if (sync.isPlaying) {
               try { e.target.playVideo(); } catch (_) {}
             }
@@ -209,6 +214,7 @@ const ChannelPage = () => {
         setChannel(res.data.channel);
         setGlobalChannelId(res.data.channel._id);
         setGlobalChannelName(res.data.channel.name);
+        if (res.data.channel.viewMode) setViewMode(res.data.channel.viewMode);
         setQueue(res.data.queue);
 
         const song = res.data.channel.currentSong;
@@ -345,6 +351,8 @@ const ChannelPage = () => {
     socket.on('chat:system', handleSystemMsg);
     socket.on('chat:typing', handleTyping);
     socket.on('chat:stop-typing', handleStopTyping);
+    const handleViewMode = ({ viewMode: vm }) => setViewMode(vm);
+    socket.on('channel:view-mode', handleViewMode);
 
     return () => {
       leaveChannel(channelId);
@@ -362,6 +370,7 @@ const ChannelPage = () => {
       socket.off('chat:system', handleSystemMsg);
       socket.off('chat:typing', handleTyping);
       socket.off('chat:stop-typing', handleStopTyping);
+      socket.off('channel:view-mode', handleViewMode);
     };
   }, [socket, channelId]);
 
@@ -411,6 +420,17 @@ const ChannelPage = () => {
   };
 
   const skipNext = () => socket?.emit('queue:next', { channelId });
+
+  // Manual sync: re-request server state and apply with a small seek-ahead offset
+  // to compensate for YouTube's ~0.5-1.5s buffer delay
+  const SEEK_OFFSET = 1.2; // seconds to seek ahead for YouTube buffer compensation
+  const handleManualSync = () => {
+    if (!socket || !currentSong) return;
+    setIsSyncing(true);
+    setSyncReady(false);
+    socket.emit('player:request-sync', { channelId });
+    setTimeout(() => setIsSyncing(false), 2000);
+  };
 
   const playPrevious = () => {
     if (currentTime > 3) {
@@ -590,6 +610,34 @@ const ChannelPage = () => {
           <button className="btn btn-secondary btn-sm" onClick={() => { setShowImportPlaylist(true); fetchMyPlaylists(); }}>
             📋 Import Playlist
           </button>
+          {/* Audio/Video mode — admin sets it, affects all members */}
+          {isAdmin ? (
+            <button
+              className="btn btn-secondary btn-sm"
+              title="Toggle audio/video mode for all members"
+              onClick={async () => {
+                const res = await api.post(`/api/channels/${channelId}/toggle-view-mode`);
+                setViewMode(res.data.viewMode);
+                setChannel(prev => ({ ...prev, viewMode: res.data.viewMode }));
+              }}
+            >
+              {viewMode === 'video' ? '📺 Video' : '🎵 Audio'}
+            </button>
+          ) : (
+            <span className="btn btn-ghost btn-sm" style={{ cursor: 'default', opacity: 0.7 }}>
+              {viewMode === 'video' ? '📺 Video' : '🎵 Audio'}
+            </span>
+          )}
+          {/* Manual sync button */}
+          <button
+            className="btn btn-secondary btn-sm"
+            title="Re-sync playback with the channel"
+            disabled={isSyncing || !currentSong}
+            onClick={handleManualSync}
+            style={{ minWidth: 72 }}
+          >
+            {isSyncing ? '⏳ Syncing' : '🔄 Sync'}
+          </button>
           {isAdmin && (
             <button className="btn btn-secondary btn-sm" onClick={async () => {
               const res = await api.post(`/api/channels/${channelId}/toggle-control`);
@@ -668,23 +716,6 @@ const ChannelPage = () => {
                 {/* YouTube player */}
                 {currentSong.source === 'youtube' && (
                   <div style={{ marginBottom: 'var(--space-4)', borderRadius: 'var(--radius-md)', overflow: 'hidden', position: 'relative' }}>
-                    {/* Audio/Video toggle */}
-                    <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 10, display: 'flex', gap: 4 }}>
-                      <button
-                        onClick={() => setViewMode('video')}
-                        style={{
-                          padding: '3px 10px', borderRadius: 'var(--radius-full)', fontSize: 11, fontWeight: 600,
-                          background: viewMode === 'video' ? 'var(--accent-primary)' : 'rgba(0,0,0,0.6)',
-                          color: '#fff', border: 'none', cursor: 'pointer',
-                        }}>📺 Video</button>
-                      <button
-                        onClick={() => setViewMode('audio')}
-                        style={{
-                          padding: '3px 10px', borderRadius: 'var(--radius-full)', fontSize: 11, fontWeight: 600,
-                          background: viewMode === 'audio' ? 'var(--accent-primary)' : 'rgba(0,0,0,0.6)',
-                          color: '#fff', border: 'none', cursor: 'pointer',
-                        }}>🎵 Audio</button>
-                    </div>
 
                     {/* YT iframe — always in DOM for audio, hidden in audio mode */}
                     <div ref={ytPlayerDivRef} style={{ width: '100%', minHeight: 200, display: viewMode === 'video' ? 'block' : 'none' }} />

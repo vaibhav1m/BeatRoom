@@ -17,6 +17,8 @@ const server = http.createServer(app);
 // Initialize Socket.io
 const io = initSocket(server);
 setupSocketHandlers(io);
+// Make io accessible in route controllers via req.app.get('io')
+app.set('io', io);
 
 // Middleware
 app.use(cors({

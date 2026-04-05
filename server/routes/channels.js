@@ -3,7 +3,7 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const {
   createChannel, getChannels, getChannel, joinChannel, leaveChannel,
-  deleteChannel, kickUser, joinByInvite, getChannelByInvite, toggleControl, unbanUser,
+  deleteChannel, kickUser, joinByInvite, getChannelByInvite, toggleControl, toggleViewMode, unbanUser,
 } = require('../controllers/channelController');
 
 router.post('/', auth, createChannel);
@@ -17,5 +17,6 @@ router.post('/:id/unban/:userId', auth, unbanUser);
 router.get('/invite/:inviteCode', auth, getChannelByInvite);
 router.post('/join/:inviteCode', auth, joinByInvite);
 router.post('/:id/toggle-control', auth, toggleControl);
+router.post('/:id/toggle-view-mode', auth, toggleViewMode);
 
 module.exports = router;
