@@ -46,6 +46,9 @@ const channelSchema = new mongoose.Schema({
     isPlaying: { type: Boolean, default: false },
     currentTime: { type: Number, default: 0 },
     updatedAt: { type: Date, default: Date.now },
+    // Timestamp representing "when would position 0 have been played"
+    // currentTime at any moment = (now - startedAt) / 1000
+    startedAt: { type: Date, default: null },
   },
   allowAllControl: {
     type: Boolean,

@@ -6,6 +6,16 @@ const playerHandler = require('./playerHandler');
 const queueHandler = require('./queueHandler');
 const notificationHandler = require('./notificationHandler');
 
+const Channel = require('../models/Channel');
+
+// Helper: compute accurate current playback time
+const computeSyncedTime = (pb) => {
+  if (!pb || !pb.isPlaying) return pb?.currentTime || 0;
+  if (pb.startedAt) return Math.max(0, (Date.now() - new Date(pb.startedAt).getTime()) / 1000);
+  const elapsed = (Date.now() - new Date(pb.updatedAt).getTime()) / 1000;
+  return Math.max(0, (pb.currentTime || 0) + elapsed);
+};
+
 const setupSocketHandlers = (io) => {
   // Auth middleware for socket connections
   io.use(async (socket, next) => {
@@ -30,17 +40,34 @@ const setupSocketHandlers = (io) => {
     io.emit('user:online', { userId: socket.user._id, username: socket.user.username });
 
     // Channel join/leave
-    socket.on('channel:join', (channelId) => {
+    socket.on('channel:join', async (channelId) => {
       socket.join(`channel:${channelId}`);
       socket.currentChannel = channelId;
       socket.to(`channel:${channelId}`).emit('channel:user-joined', {
         user: { _id: socket.user._id, username: socket.user.username, avatar: socket.user.avatar },
       });
-      io.to(`channel:${channelId}`).emit('chat:system', {
+      socket.to(`channel:${channelId}`).emit('chat:system', {
         text: `${socket.user.username} joined the channel`,
         type: 'join',
         timestamp: new Date(),
       });
+
+      // Proactively push current playback state to the joining socket.
+      // This is the primary sync mechanism — more reliable than waiting for
+      // client to emit player:request-sync and hoping the listener is ready.
+      try {
+        const channel = await Channel.findById(channelId).populate('currentSong');
+        if (channel?.currentSong) {
+          socket.emit('player:state', {
+            isPlaying: channel.playbackState.isPlaying,
+            currentTime: computeSyncedTime(channel.playbackState),
+            song: channel.currentSong,
+          });
+        }
+      } catch (e) {
+        console.error('Join sync error:', e.message);
+      }
+
       console.log(`  📺 ${socket.user.username} joined channel ${channelId}`);
     });
 

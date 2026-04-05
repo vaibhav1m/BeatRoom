@@ -5,7 +5,6 @@ import { useSocket } from '../../context/SocketContext';
 import { useTheme, THEMES } from '../../context/ThemeContext';
 import { getInitials } from '../../utils/helpers';
 import { getAvatarColor } from '../../utils/constants';
-import MiniPlayer from '../MiniPlayer';
 import { useToast } from '../../context/ToastContext';
 import api from '../../services/api';
 
@@ -324,7 +323,6 @@ const Layout = () => {
         </div>
       </main>
     </div>
-    <MiniPlayer />
     </>
   );
 };

@@ -79,11 +79,13 @@ const ChannelPage = () => {
   const chatEndRef = useRef(null);
   const typingTimeout = useRef(null);
   const ytPlayerInstance = useRef(null);
+  const ytPlayerDivRef = useRef(null);       // DOM ref — avoids YT API's internal ID cache bug on remount
   const timeInterval = useRef(null);
   const isRepeatRef = useRef(false);
   const currentSongRef = useRef(null);
   const socketRef = useRef(socket);          // always-current socket for YT callbacks
   const pendingSyncRef = useRef(null);       // sync to apply once YT player is ready
+  const serverSyncRef = useRef(null);        // last known server time { time, receivedAt, isPlaying }
 
   useEffect(() => { isRepeatRef.current = isRepeat; }, [isRepeat]);
   useEffect(() => { currentSongRef.current = currentSong; }, [currentSong]);
@@ -98,12 +100,7 @@ const ChannelPage = () => {
   useEffect(() => { localStorage.setItem('beatroom_muted', isMuted); }, [isMuted]);
   useEffect(() => { localStorage.setItem('beatroom_view_mode', viewMode); }, [viewMode]);
 
-  // Re-request sync once YT API becomes ready (covers late-load race condition)
-  useEffect(() => {
-    if (ytApiReady && socketRef.current && channelId) {
-      socketRef.current.emit('player:request-sync', { channelId });
-    }
-  }, [ytApiReady]);
+  // Note: sync is now pushed by the server on channel:join — no client pull needed here
 
   // Load YouTube IFrame API once
   useEffect(() => {
@@ -138,12 +135,14 @@ const ChannelPage = () => {
     const capturedVolume = volume;
     const capturedMuted = isMuted;
 
-    ytPlayerInstance.current = new window.YT.Player('yt-player-div', {
+    // Use DOM ref instead of string ID — avoids YouTube API's internal element
+    // cache that causes silent failures when the component remounts
+    if (!ytPlayerDivRef.current) return;
+
+    ytPlayerInstance.current = new window.YT.Player(ytPlayerDivRef.current, {
       height: '200',
       width: '100%',
       videoId: currentSong.sourceId,
-      // Always start unplayed — onReady applies the correct sync position
-      // (avoids browser autoplay block which silently prevents video from rendering)
       playerVars: { autoplay: 0, enablejsapi: 1, origin: window.location.origin },
       events: {
         onReady: (e) => {
@@ -151,13 +150,11 @@ const ChannelPage = () => {
           if (capturedMuted) e.target.mute();
           const dur = e.target.getDuration();
           if (dur) setDuration(dur);
-          // Apply sync — pendingSyncRef is ALWAYS set (from fetchChannel or handlePlayerState)
+
           const sync = pendingSyncRef.current;
           if (sync) {
             e.target.seekTo(sync.currentTime, true);
             if (sync.isPlaying) {
-              // playVideo() requires a prior user gesture on mobile.
-              // Attempt it; if browser blocks it, the player shows paused at correct position.
               try { e.target.playVideo(); } catch (_) {}
             }
             pendingSyncRef.current = null;
@@ -168,10 +165,20 @@ const ChannelPage = () => {
           if (e.data === window.YT.PlayerState.PLAYING) {
             clearInterval(timeInterval.current);
             timeInterval.current = setInterval(() => {
-              if (ytPlayerInstance.current && ytPlayerInstance.current.getCurrentTime) {
-                setCurrentTime(ytPlayerInstance.current.getCurrentTime());
-                const d = ytPlayerInstance.current.getDuration();
-                if (d && d > 0) setDuration(d);
+              if (!ytPlayerInstance.current?.getCurrentTime) return;
+              const actual = ytPlayerInstance.current.getCurrentTime();
+              setCurrentTime(actual);
+              const d = ytPlayerInstance.current.getDuration?.();
+              if (d && d > 0) setDuration(d);
+
+              // Drift correction: if we're more than 2 seconds off from where
+              // the server says we should be, snap back to correct position
+              if (serverSyncRef.current?.isPlaying) {
+                const expected = serverSyncRef.current.time +
+                  (Date.now() - serverSyncRef.current.receivedAt) / 1000;
+                if (Math.abs(actual - expected) > 2) {
+                  ytPlayerInstance.current.seekTo(expected, true);
+                }
               }
             }, 500);
           }
@@ -184,7 +191,6 @@ const ChannelPage = () => {
               e.target.seekTo(0, true);
               e.target.playVideo();
             } else {
-              // Use socketRef to avoid stale closure
               socketRef.current?.emit('queue:next', { channelId });
             }
           }
@@ -245,7 +251,7 @@ const ChannelPage = () => {
     if (!socket || !channelId) return;
     joinChannel(channelId);
     socket.emit('chat:history', { channelId });
-    socket.emit('player:request-sync', { channelId });
+    // player:request-sync removed — server now pushes player:state on channel:join
 
     const handleSocketError = (err) => toast.error(err?.message || 'Something went wrong');
     socket.on('error', handleSocketError);
@@ -273,6 +279,9 @@ const ChannelPage = () => {
         }
         setCurrentSong(song);
       }
+
+      // Track server time for drift correction
+      serverSyncRef.current = { time: ct || 0, receivedAt: Date.now(), isPlaying: playing };
 
       // Always store in pendingSyncRef so onReady (new or existing player) can apply it
       pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
@@ -678,7 +687,7 @@ const ChannelPage = () => {
                     </div>
 
                     {/* YT iframe — always in DOM for audio, hidden in audio mode */}
-                    <div id="yt-player-div" style={{ width: '100%', minHeight: 200, display: viewMode === 'video' ? 'block' : 'none' }} />
+                    <div ref={ytPlayerDivRef} style={{ width: '100%', minHeight: 200, display: viewMode === 'video' ? 'block' : 'none' }} />
 
                     {/* Audio-only visualiser */}
                     {viewMode === 'audio' && (
