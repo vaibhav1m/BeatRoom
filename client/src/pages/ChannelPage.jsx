@@ -18,6 +18,7 @@ const ChannelPage = () => {
 
   useEffect(() => {
     setActiveChannelId(channelId);
+    setSyncReady(false); // reset sync overlay on channel change
     return () => setActiveChannelId(null);
   }, [channelId, setActiveChannelId]);
 
@@ -51,6 +52,10 @@ const ChannelPage = () => {
   const [ytApiReady, setYtApiReady] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekDraft, setSeekDraft] = useState(0);
+  // Audio-only / video mode
+  const [viewMode, setViewMode] = useState(() => localStorage.getItem('beatroom_view_mode') || 'video');
+  // Sync loading state — show spinner until first player:state is received
+  const [syncReady, setSyncReady] = useState(false);
 
   // Import playlist state
   const [showImportPlaylist, setShowImportPlaylist] = useState(false);
@@ -88,9 +93,10 @@ const ChannelPage = () => {
   useEffect(() => { setGlobalSong(currentSong); }, [currentSong]);
   useEffect(() => { setGlobalPlaying(isPlaying); }, [isPlaying]);
 
-  // Persist volume to localStorage
+  // Persist volume + viewMode to localStorage
   useEffect(() => { localStorage.setItem('beatroom_volume', volume); }, [volume]);
   useEffect(() => { localStorage.setItem('beatroom_muted', isMuted); }, [isMuted]);
+  useEffect(() => { localStorage.setItem('beatroom_view_mode', viewMode); }, [viewMode]);
 
   // Re-request sync once YT API becomes ready (covers late-load race condition)
   useEffect(() => {
@@ -131,26 +137,32 @@ const ChannelPage = () => {
 
     const capturedVolume = volume;
     const capturedMuted = isMuted;
-    const capturedPlaying = isPlaying;
 
     ytPlayerInstance.current = new window.YT.Player('yt-player-div', {
       height: '200',
       width: '100%',
       videoId: currentSong.sourceId,
-      playerVars: { autoplay: capturedPlaying ? 1 : 0, enablejsapi: 1, origin: window.location.origin },
+      // Always start unplayed — onReady applies the correct sync position
+      // (avoids browser autoplay block which silently prevents video from rendering)
+      playerVars: { autoplay: 0, enablejsapi: 1, origin: window.location.origin },
       events: {
         onReady: (e) => {
           e.target.setVolume(capturedVolume);
           if (capturedMuted) e.target.mute();
           const dur = e.target.getDuration();
           if (dur) setDuration(dur);
-          // Apply any sync that arrived before the player was ready
-          if (pendingSyncRef.current) {
-            const { isPlaying: p, currentTime: ct } = pendingSyncRef.current;
-            e.target.seekTo(ct, true);
-            if (p) e.target.playVideo(); else e.target.pauseVideo();
+          // Apply sync — pendingSyncRef is ALWAYS set (from fetchChannel or handlePlayerState)
+          const sync = pendingSyncRef.current;
+          if (sync) {
+            e.target.seekTo(sync.currentTime, true);
+            if (sync.isPlaying) {
+              // playVideo() requires a prior user gesture on mobile.
+              // Attempt it; if browser blocks it, the player shows paused at correct position.
+              try { e.target.playVideo(); } catch (_) {}
+            }
             pendingSyncRef.current = null;
           }
+          setSyncReady(true);
         },
         onStateChange: (e) => {
           if (e.data === window.YT.PlayerState.PLAYING) {
@@ -192,8 +204,27 @@ const ChannelPage = () => {
         setGlobalChannelId(res.data.channel._id);
         setGlobalChannelName(res.data.channel.name);
         setQueue(res.data.queue);
-        setCurrentSong(res.data.channel.currentSong);
-        setIsPlaying(res.data.channel.playbackState?.isPlaying || false);
+
+        const song = res.data.channel.currentSong;
+        const pb = res.data.channel.playbackState;
+        const pbPlaying = pb?.isPlaying || false;
+
+        // Compute time-corrected position so player starts at the right spot
+        const elapsed = pbPlaying && pb?.updatedAt
+          ? (Date.now() - new Date(pb.updatedAt).getTime()) / 1000
+          : 0;
+        const correctedTime = Math.max(0, (pb?.currentTime || 0) + elapsed);
+
+        setCurrentSong(song);
+        setIsPlaying(pbPlaying);
+        setCurrentTime(correctedTime);
+
+        // Pre-load pendingSyncRef so the YT player's onReady applies immediately
+        // (overwrite only if no more-recent sync arrived via socket yet)
+        if (song && !pendingSyncRef.current) {
+          pendingSyncRef.current = { isPlaying: pbPlaying, currentTime: correctedTime };
+        }
+
         // Seed online users from DB isOnline field
         const online = new Set(
           (res.data.channel.members || []).filter(m => m.isOnline).map(m => m._id)
@@ -230,8 +261,8 @@ const ChannelPage = () => {
     const handlePlayerState = ({ isPlaying: playing, currentTime: ct, song }) => {
       setIsPlaying(playing);
       setCurrentTime(ct || 0);
+      setSyncReady(true);
 
-      // Detect if this sync carries a different song (new YT player will be created)
       const songChanging = song !== undefined && song !== null &&
         currentSongRef.current?._id &&
         song._id !== currentSongRef.current._id;
@@ -243,31 +274,26 @@ const ChannelPage = () => {
         setCurrentSong(song);
       }
 
-      // If the song is changing, the YT useEffect will destroy+recreate the player.
-      // Pre-store sync data so the new player's onReady applies it immediately.
-      if (songChanging) {
-        pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
-        return;
-      }
+      // Always store in pendingSyncRef so onReady (new or existing player) can apply it
+      pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
 
-      // Same song (or no song in payload) — try to control the existing player
+      // If song is changing, YT useEffect will destroy+recreate the player — pendingSyncRef covers it
+      if (songChanging) return;
+
+      // Same song — if player already exists and is past UNSTARTED, control it directly
       if (ytPlayerInstance.current) {
         try {
           const state = ytPlayerInstance.current.getPlayerState?.();
-          if (state === -1 || state == null) {
-            // UNSTARTED — onReady hasn't fired yet; store for it
-            pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
-          } else {
+          if (state !== -1 && state != null) {
             ytPlayerInstance.current.seekTo(ct || 0, true);
             if (playing) ytPlayerInstance.current.playVideo();
             else ytPlayerInstance.current.pauseVideo();
+            pendingSyncRef.current = null; // applied, clear it
           }
-        } catch (e) {
-          pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
-        }
-      } else {
-        pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
+          // state === -1 (UNSTARTED): leave pendingSyncRef for onReady to apply
+        } catch (e) { /* leave pendingSyncRef */ }
       }
+      // player null: leave pendingSyncRef for when player is created
     };
     const handlePlayerSeek = ({ currentTime: ct }) => {
       setCurrentTime(ct);
@@ -632,8 +658,59 @@ const ChannelPage = () => {
 
                 {/* YouTube player */}
                 {currentSong.source === 'youtube' && (
-                  <div style={{ marginBottom: 'var(--space-4)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
-                    <div id="yt-player-div" style={{ width: '100%', minHeight: 200 }} />
+                  <div style={{ marginBottom: 'var(--space-4)', borderRadius: 'var(--radius-md)', overflow: 'hidden', position: 'relative' }}>
+                    {/* Audio/Video toggle */}
+                    <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 10, display: 'flex', gap: 4 }}>
+                      <button
+                        onClick={() => setViewMode('video')}
+                        style={{
+                          padding: '3px 10px', borderRadius: 'var(--radius-full)', fontSize: 11, fontWeight: 600,
+                          background: viewMode === 'video' ? 'var(--accent-primary)' : 'rgba(0,0,0,0.6)',
+                          color: '#fff', border: 'none', cursor: 'pointer',
+                        }}>📺 Video</button>
+                      <button
+                        onClick={() => setViewMode('audio')}
+                        style={{
+                          padding: '3px 10px', borderRadius: 'var(--radius-full)', fontSize: 11, fontWeight: 600,
+                          background: viewMode === 'audio' ? 'var(--accent-primary)' : 'rgba(0,0,0,0.6)',
+                          color: '#fff', border: 'none', cursor: 'pointer',
+                        }}>🎵 Audio</button>
+                    </div>
+
+                    {/* YT iframe — always in DOM for audio, hidden in audio mode */}
+                    <div id="yt-player-div" style={{ width: '100%', minHeight: 200, display: viewMode === 'video' ? 'block' : 'none' }} />
+
+                    {/* Audio-only visualiser */}
+                    {viewMode === 'audio' && (
+                      <div style={{
+                        height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: 'linear-gradient(135deg, var(--bg-tertiary), var(--bg-elevated))',
+                        gap: 6,
+                      }}>
+                        {[1,2,3,4,5,6,7,8].map(i => (
+                          <div key={i} style={{
+                            width: 6, borderRadius: 3,
+                            background: 'var(--accent-primary)',
+                            height: isPlaying ? `${20 + Math.sin(i * 0.8) * 40 + 20}px` : '8px',
+                            animation: isPlaying ? `bar-bounce ${0.6 + i * 0.1}s ease-in-out infinite alternate` : 'none',
+                            transition: 'height 0.3s ease',
+                          }} />
+                        ))}
+                        <style>{`@keyframes bar-bounce { from { transform: scaleY(0.3); } to { transform: scaleY(1); } }`}</style>
+                      </div>
+                    )}
+
+                    {/* Sync loading overlay — shown until first sync arrives */}
+                    {!syncReady && (
+                      <div style={{
+                        position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: 'rgba(0,0,0,0.7)', borderRadius: 'var(--radius-md)', zIndex: 5,
+                        flexDirection: 'column', gap: 12,
+                      }}>
+                        <div style={{ fontSize: 32 }}>🎵</div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Syncing playback...</div>
+                      </div>
+                    )}
                   </div>
                 )}
 
