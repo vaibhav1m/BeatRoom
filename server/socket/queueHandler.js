@@ -33,13 +33,15 @@ const queueHandler = (io, socket) => {
       // If nothing is playing, auto-play
       const channel = await Channel.findById(channelId);
       if (!channel.currentSong) {
+        const now = new Date();
         channel.currentSong = song._id;
-        channel.playbackState = { isPlaying: true, currentTime: 0, updatedAt: new Date() };
+        channel.playbackState = { isPlaying: true, currentTime: 0, updatedAt: now, startedAt: now };
         await channel.save();
         await Song.findByIdAndUpdate(song._id, { $inc: { playCount: 1 } });
         io.to(`channel:${channelId}`).emit('player:state', {
           isPlaying: true, currentTime: 0, song,
           controlledBy: 'system',
+          serverTime: Date.now(),
         });
       }
       io.to(`channel:${channelId}`).emit('chat:system', {
@@ -179,12 +181,14 @@ const queueHandler = (io, socket) => {
       queue.markModified('items');
       await queue.save();
       const song = await Song.findById(item.song);
+      const now = new Date();
       channel.currentSong = song._id;
-      channel.playbackState = { isPlaying: true, currentTime: 0, updatedAt: new Date() };
+      channel.playbackState = { isPlaying: true, currentTime: 0, updatedAt: now, startedAt: now };
       await channel.save();
       await Song.findByIdAndUpdate(song._id, { $inc: { playCount: 1 } });
       io.to(`channel:${channelId}`).emit('player:state', {
         isPlaying: true, currentTime: 0, song, controlledBy: socket.user.username,
+        serverTime: Date.now(),
       });
       const populated = await Queue.findById(queue._id)
         .populate('items.song')
@@ -247,12 +251,14 @@ const queueHandler = (io, socket) => {
         const [firstItem] = queue.items.splice(0, 1);
         await queue.save();
         const song = await Song.findById(firstItem.song);
+        const now = new Date();
         channel.currentSong = song._id;
-        channel.playbackState = { isPlaying: true, currentTime: 0, updatedAt: new Date() };
+        channel.playbackState = { isPlaying: true, currentTime: 0, updatedAt: now, startedAt: now };
         await channel.save();
         await Song.findByIdAndUpdate(song._id, { $inc: { playCount: 1 } });
         io.to(`channel:${channelId}`).emit('player:state', {
           isPlaying: true, currentTime: 0, song, controlledBy: 'auto-play',
+          serverTime: Date.now(),
         });
         const updatedQueue = await Queue.findById(queue._id)
           .populate('items.song')
@@ -277,19 +283,22 @@ const queueHandler = (io, socket) => {
         await channel.save();
         io.to(`channel:${channelId}`).emit('player:state', {
           isPlaying: false, currentTime: 0, song: null,
+          serverTime: Date.now(),
         });
         return;
       }
       const nextItem = queue.items.shift();
       await queue.save();
       const song = await Song.findById(nextItem.song);
+      const now = new Date();
       channel.currentSong = song._id;
-      channel.playbackState = { isPlaying: true, currentTime: 0, updatedAt: new Date() };
+      channel.playbackState = { isPlaying: true, currentTime: 0, updatedAt: now, startedAt: now };
       await channel.save();
       await Song.findByIdAndUpdate(song._id, { $inc: { playCount: 1 } });
       io.to(`channel:${channelId}`).emit('player:state', {
         isPlaying: true, currentTime: 0, song,
         controlledBy: 'auto-play',
+        serverTime: Date.now(),
       });
       const populated = await Queue.findById(queue._id)
         .populate('items.song')

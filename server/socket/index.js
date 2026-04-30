@@ -39,22 +39,34 @@ const setupSocketHandlers = (io) => {
     await User.findByIdAndUpdate(socket.user._id, { isOnline: true });
     io.emit('user:online', { userId: socket.user._id, username: socket.user.username });
 
+    // Clock sync — client uses ack to compute server-vs-client skew
+    socket.on('time:sync', (clientTime, ack) => {
+      if (typeof ack === 'function') ack({ serverTime: Date.now(), clientTime });
+    });
+
     // Channel join/leave
     socket.on('channel:join', async (channelId) => {
-      socket.join(`channel:${channelId}`);
+      const roomName = `channel:${channelId}`;
+      // Guard: socket.rooms already contains this room in React StrictMode's
+      // double-invocation or when the client emits channel:join twice.
+      // Skip the broadcast but still send sync state.
+      const alreadyInRoom = socket.rooms.has(roomName);
+      socket.join(roomName);
       socket.currentChannel = channelId;
-      socket.to(`channel:${channelId}`).emit('channel:user-joined', {
-        user: { _id: socket.user._id, username: socket.user.username, avatar: socket.user.avatar },
-      });
-      socket.to(`channel:${channelId}`).emit('chat:system', {
-        text: `${socket.user.username} joined the channel`,
-        type: 'join',
-        timestamp: new Date(),
-      });
+
+      if (!alreadyInRoom) {
+        socket.to(roomName).emit('channel:user-joined', {
+          user: { _id: socket.user._id, username: socket.user.username, avatar: socket.user.avatar },
+        });
+        socket.to(roomName).emit('chat:system', {
+          text: `${socket.user.username} joined the channel`,
+          type: 'join',
+          timestamp: new Date(),
+        });
+      }
 
       // Proactively push current playback state to the joining socket.
-      // This is the primary sync mechanism — more reliable than waiting for
-      // client to emit player:request-sync and hoping the listener is ready.
+      // Includes serverTime so the client can compensate for network latency precisely.
       try {
         const channel = await Channel.findById(channelId).populate('currentSong');
         if (channel?.currentSong) {
@@ -62,6 +74,7 @@ const setupSocketHandlers = (io) => {
             isPlaying: channel.playbackState.isPlaying,
             currentTime: computeSyncedTime(channel.playbackState),
             song: channel.currentSong,
+            serverTime: Date.now(),
           });
         }
       } catch (e) {
@@ -126,6 +139,38 @@ const setupSocketHandlers = (io) => {
       console.log(`🔌 ${socket.user.username} disconnected`);
     });
   });
+
+  // Periodic heartbeat: every 5s, broadcast authoritative playback state to every
+  // active channel room. This is the safety net — even if a join-time push is dropped
+  // or a client misses an event, they will be brought back into sync within 5s.
+  setInterval(async () => {
+    try {
+      const rooms = io.sockets.adapter.rooms;
+      const channelIds = [];
+      for (const [name, sockets] of rooms.entries()) {
+        if (name.startsWith('channel:') && sockets.size > 0) {
+          channelIds.push(name.slice('channel:'.length));
+        }
+      }
+      if (!channelIds.length) return;
+
+      const channels = await Channel.find({ _id: { $in: channelIds } })
+        .populate('currentSong')
+        .select('currentSong playbackState');
+
+      for (const ch of channels) {
+        if (!ch.currentSong) continue;
+        io.to(`channel:${ch._id}`).emit('player:heartbeat', {
+          isPlaying: ch.playbackState.isPlaying,
+          currentTime: computeSyncedTime(ch.playbackState),
+          songId: String(ch.currentSong._id),
+          serverTime: Date.now(),
+        });
+      }
+    } catch (e) {
+      console.error('Heartbeat error:', e.message);
+    }
+  }, 5000);
 };
 
 module.exports = setupSocketHandlers;

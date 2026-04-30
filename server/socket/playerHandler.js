@@ -35,6 +35,7 @@ const playerHandler = (io, socket) => {
       io.to(`channel:${channelId}`).emit('player:state', {
         isPlaying: true, currentTime: ct, song,
         controlledBy: socket.user.username,
+        serverTime: Date.now(),
       });
     } catch (err) {
       socket.emit('error', { message: 'Failed to play' });
@@ -60,6 +61,7 @@ const playerHandler = (io, socket) => {
       await channel.save();
       io.to(`channel:${channelId}`).emit('player:state', {
         isPlaying: false, currentTime, controlledBy: socket.user.username,
+        serverTime: Date.now(),
       });
     } catch (err) {
       socket.emit('error', { message: 'Failed to pause' });
@@ -88,6 +90,7 @@ const playerHandler = (io, socket) => {
       await channel.save();
       io.to(`channel:${channelId}`).emit('player:seek', {
         currentTime, controlledBy: socket.user.username,
+        serverTime: Date.now(),
       });
     } catch (err) {
       socket.emit('error', { message: 'Failed to seek' });
@@ -104,6 +107,7 @@ const playerHandler = (io, socket) => {
           isPlaying: channel.playbackState.isPlaying,
           currentTime: computeSyncedTime(channel.playbackState),
           song: channel.currentSong,
+          serverTime: Date.now(),
         });
       }
     } catch (err) {
