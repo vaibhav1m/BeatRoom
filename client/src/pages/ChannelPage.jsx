@@ -150,48 +150,66 @@ const ChannelPage = () => {
     return Math.max(0, sv.time + elapsedMs / 1000);
   }, [serverNow]);
 
-  // Create YT player when song changes — fast-path sync via playerVars
   useEffect(() => {
     if (!ytApiReady) return;
     clearInterval(timeInterval.current);
-    if (ytPlayerInstance.current) {
-      try { ytPlayerInstance.current.destroy(); } catch (e) {}
-      ytPlayerInstance.current = null;
-    }
+
     if (!currentSong || currentSong.source !== 'youtube') {
+      if (ytPlayerInstance.current) {
+        try { ytPlayerInstance.current.destroy(); } catch (e) {}
+        ytPlayerInstance.current = null;
+      }
       setCurrentTime(0); setDuration(0); setSyncReady(true); setNeedsUnmute(false);
       return;
     }
+
     if (currentSong.duration) setDuration(currentSong.duration);
     setSyncReady(false);
     if (!ytPlayerDivRef.current) return;
 
-    const sync = pendingSyncRef.current || { isPlaying: false, currentTime: 0 };
+    const sync = pendingSyncRef.current || { isPlaying: isPlaying, currentTime: currentTime };
     pendingSyncRef.current = null;
 
-    // Compute the live target position right now using server-corrected clock.
     const targetTime = sync.isPlaying ? getExpectedTime() : (sync.currentTime || 0);
-
-    // ─── WARM BUFFER TECHNIQUE ────────────────────────────────────────────────
-    // Load the video PREHEAT seconds BEFORE the target. YouTube fetches segments
-    // forward in order, so by the time onReady fires (~0.5-1s), the segments
-    // covering targetTime are already in the buffer. The seekTo(targetTime) in
-    // onReady is then near-instant instead of triggering a full cold re-buffer.
-    const PREHEAT = 12; // seconds to pre-load before the sync target
-    const preheatStart = Math.max(0, targetTime - PREHEAT);
 
     const forceMute = sync.isPlaying && !userInteractedRef.current;
     if (forceMute) setNeedsUnmute(true);
     const startMuted = forceMute || isMuted;
 
+    // ── Fast path: reuse existing player with loadVideoById ──────────────────
+    // Swaps the video without tearing down the iframe. No blank gap, no
+    // re-initialization cost. onStateChange (already registered) fires for
+    // the new video's PLAYING/ENDED events.
+    if (ytPlayerInstance.current) {
+      try {
+        const player = ytPlayerInstance.current;
+        if (startMuted) player.mute(); else player.unMute();
+        player.setVolume(volume);
+        if (sync.isPlaying) {
+          player.loadVideoById({ videoId: currentSong.sourceId, startSeconds: targetTime });
+        } else {
+          player.cueVideoById({ videoId: currentSong.sourceId, startSeconds: targetTime });
+          setSyncReady(true);
+        }
+        return;
+      } catch (_) { // eslint-disable-line no-unused-vars
+        try { ytPlayerInstance.current.destroy(); } catch (_) {}
+        ytPlayerInstance.current = null;
+      }
+    }
+
+    // ── Slow path: create fresh player (first load or after error) ───────────
+    // Load directly at targetTime. No pre-heat — loading 12s before just wastes
+    // bandwidth on slow connections; YouTube has to fetch those extra segments
+    // before it can reach the target, making the initial sync take 3-8s longer.
     ytPlayerInstance.current = new window.YT.Player(ytPlayerDivRef.current, {
       height: '200',
       width: '100%',
       videoId: currentSong.sourceId,
       playerVars: {
-        autoplay: 1,                          // always start loading immediately (muted = no autoplay wall)
+        autoplay: 1,
         mute: startMuted ? 1 : 0,
-        start: Math.floor(preheatStart),      // load PREHEAT seconds before target
+        start: Math.floor(targetTime),
         enablejsapi: 1, playsinline: 1,
         controls: 0, modestbranding: 1, rel: 0,
         origin: window.location.origin,
@@ -204,13 +222,12 @@ const ChannelPage = () => {
           if (dur) setDuration(dur);
 
           if (sync.isPlaying) {
-            // Seek to live target — should already be in warm buffer, so near-instant.
-            // Recalculate with fresh server time to absorb the onReady delay.
+            // Fine-tune: absorb time elapsed between effect and onReady (~0.5-2s).
+            // seekTo is cheap here because we're already at floor(targetTime).
             const liveNow = getExpectedTime();
             try { e.target.seekTo(liveNow, true); } catch (_) {}
             try { e.target.playVideo(); } catch (_) {}
           } else {
-            // Paused: seek to exact pause position (within preheat range — instant)
             try { e.target.seekTo(sync.currentTime || 0, true); } catch (_) {}
             try { e.target.pauseVideo(); } catch (_) {}
             setSyncReady(true);
@@ -402,6 +419,12 @@ const ChannelPage = () => {
       if (song !== undefined) {
         if (songChanging) {
           setSongHistory(prev => [...prev.slice(-9), currentSongRef.current]);
+          // Pause current video immediately so users don't see the wrong song for
+          // the ~100ms until React re-renders and the YT effect fires.
+          // (pauseVideo not stopVideo — stopVideo can trigger ENDED → queue:next)
+          if (ytPlayerInstance.current) {
+            try { ytPlayerInstance.current.pauseVideo(); } catch (_) {}
+          }
         }
         setCurrentSong(song);
       }
@@ -412,7 +435,7 @@ const ChannelPage = () => {
       serverSyncRef.current = { time: ct || 0, serverTime: sTime, isPlaying: playing };
       pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0, serverTime: sTime };
 
-      if (songChanging) return; // YT effect will recreate player and apply pendingSyncRef
+      if (songChanging) return; // YT effect will apply pendingSyncRef via loadVideoById
 
       // Same song — if player exists, push the change directly.
       // IMPORTANT: if this event is the echo of our own action (we sent it < 2s ago),
