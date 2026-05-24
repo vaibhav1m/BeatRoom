@@ -11,33 +11,16 @@ import { getAvatarColor, EMOJIS } from '../utils/constants';
 const ChannelPage = () => {
   const { channelId } = useParams();
   const { user } = useAuth();
-  const { socket, joinChannel, leaveChannel, setActiveChannelId, serverNow } = useSocket();
+  const { socket, joinChannel, leaveChannel, setActiveChannelId } = useSocket();
   const { toast } = useToast();
   const { setCurrentSong: setGlobalSong, setIsPlaying: setGlobalPlaying, setCurrentChannelId: setGlobalChannelId, setChannelName: setGlobalChannelName } = usePlayer();
   const navigate = useNavigate();
 
   useEffect(() => {
     setActiveChannelId(channelId);
-    setSyncReady(false); // reset sync overlay on channel change
-    setNeedsUnmute(false);
+    setSyncReady(false);
     return () => setActiveChannelId(null);
   }, [channelId, setActiveChannelId]);
-
-  // Track whether the user has produced any gesture in this tab.
-  // Browsers allow unmuted autoplay only after one. We treat "joined this tab fresh"
-  // as no gesture, so we force-mute in that case.
-  const userInteractedRef = useRef(false);
-  useEffect(() => {
-    const mark = () => { userInteractedRef.current = true; };
-    window.addEventListener('pointerdown', mark, { once: true, capture: true });
-    window.addEventListener('keydown', mark, { once: true, capture: true });
-    window.addEventListener('touchstart', mark, { once: true, capture: true });
-    return () => {
-      window.removeEventListener('pointerdown', mark, { capture: true });
-      window.removeEventListener('keydown', mark, { capture: true });
-      window.removeEventListener('touchstart', mark, { capture: true });
-    };
-  }, []);
 
   // Channel & chat state
   const [channel, setChannel] = useState(null);
@@ -57,7 +40,6 @@ const ChannelPage = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  // Volume persisted in localStorage
   const [volume, setVolume] = useState(() => {
     const v = localStorage.getItem('beatroom_volume');
     return v !== null ? parseInt(v, 10) : 80;
@@ -69,15 +51,8 @@ const ChannelPage = () => {
   const [ytApiReady, setYtApiReady] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekDraft, setSeekDraft] = useState(0);
-  // viewMode is channel-level (admin sets it, all members follow)
   const [viewMode, setViewMode] = useState('video');
-  // Sync loading state — show spinner until YT player actually reaches PLAYING/PAUSED with sync applied
   const [syncReady, setSyncReady] = useState(false);
-  // True when we force-muted the player to bypass browser autoplay restrictions.
-  // Shows a small "Tap to unmute" pill — does NOT block playback.
-  const [needsUnmute, setNeedsUnmute] = useState(false);
-  // How many seconds behind the server this client currently is (0 = in sync)
-  const [lagSeconds, setLagSeconds] = useState(0);
 
   // Import playlist state
   const [showImportPlaylist, setShowImportPlaylist] = useState(false);
@@ -85,9 +60,9 @@ const ChannelPage = () => {
   const [importingPlaylist, setImportingPlaylist] = useState(null);
 
   // Save to playlist state
-  const [songToSave, setSongToSave] = useState(null); // song object to save
-  const [savingToPlaylist, setSavingToPlaylist] = useState(null); // playlistId currently saving to
-  const [saveSuccess, setSaveSuccess] = useState(null); // playlistId that just succeeded
+  const [songToSave, setSongToSave] = useState(null);
+  const [savingToPlaylist, setSavingToPlaylist] = useState(null);
+  const [saveSuccess, setSaveSuccess] = useState(null);
 
   // Queue drag-to-reorder state
   const [dragFromIndex, setDragFromIndex] = useState(null);
@@ -101,14 +76,12 @@ const ChannelPage = () => {
   const chatEndRef = useRef(null);
   const typingTimeout = useRef(null);
   const ytPlayerInstance = useRef(null);
-  const ytPlayerDivRef = useRef(null);       // DOM ref — avoids YT API's internal ID cache bug on remount
+  const ytPlayerDivRef = useRef(null);
   const timeInterval = useRef(null);
   const isRepeatRef = useRef(false);
   const currentSongRef = useRef(null);
-  const socketRef = useRef(socket);          // always-current socket for YT callbacks
-  const pendingSyncRef = useRef(null);       // sync to apply once YT player is ready
-  const serverSyncRef = useRef(null);        // last known server time { time, receivedAt, isPlaying }
-  const selfControlledAt = useRef(0);        // Date.now() when this client last sent a control action
+  const socketRef = useRef(socket);
+  const pendingSyncRef = useRef(null); // initial sync to apply when YT player is ready
 
   useEffect(() => { isRepeatRef.current = isRepeat; }, [isRepeat]);
   useEffect(() => { currentSongRef.current = currentSong; }, [currentSong]);
@@ -121,8 +94,6 @@ const ChannelPage = () => {
   // Persist volume to localStorage
   useEffect(() => { localStorage.setItem('beatroom_volume', volume); }, [volume]);
   useEffect(() => { localStorage.setItem('beatroom_muted', isMuted); }, [isMuted]);
-
-  // Note: sync is now pushed by the server on channel:join — no client pull needed here
 
   // Load YouTube IFrame API once
   useEffect(() => {
@@ -139,77 +110,33 @@ const ChannelPage = () => {
     }
   }, []);
 
-  // Compute the playback position the player SHOULD currently be at, given the
-  // most recent server snapshot and clock-corrected elapsed time.
-  const getExpectedTime = useCallback(() => {
-    const sv = serverSyncRef.current;
-    if (!sv) return 0;
-    if (!sv.isPlaying) return sv.time;
-    // serverNow() returns server-clock-aligned ms; sv.serverTime is the server's clock at sv.time
-    const elapsedMs = serverNow() - sv.serverTime;
-    return Math.max(0, sv.time + elapsedMs / 1000);
-  }, [serverNow]);
-
+  // Create / recreate YT player whenever the song changes
   useEffect(() => {
     if (!ytApiReady) return;
     clearInterval(timeInterval.current);
-
+    if (ytPlayerInstance.current) {
+      try { ytPlayerInstance.current.destroy(); } catch (e) {}
+      ytPlayerInstance.current = null;
+    }
     if (!currentSong || currentSong.source !== 'youtube') {
-      if (ytPlayerInstance.current) {
-        try { ytPlayerInstance.current.destroy(); } catch (e) {}
-        ytPlayerInstance.current = null;
-      }
-      setCurrentTime(0); setDuration(0); setSyncReady(true); setNeedsUnmute(false);
+      setCurrentTime(0); setDuration(0); setSyncReady(true);
       return;
     }
-
     if (currentSong.duration) setDuration(currentSong.duration);
     setSyncReady(false);
     if (!ytPlayerDivRef.current) return;
 
-    const sync = pendingSyncRef.current || { isPlaying: isPlaying, currentTime: currentTime };
+    const sync = pendingSyncRef.current || { isPlaying: false, currentTime: 0 };
     pendingSyncRef.current = null;
 
-    const targetTime = sync.isPlaying ? getExpectedTime() : (sync.currentTime || 0);
-
-    const forceMute = sync.isPlaying && !userInteractedRef.current;
-    if (forceMute) setNeedsUnmute(true);
-    const startMuted = forceMute || isMuted;
-
-    // ── Fast path: reuse existing player with loadVideoById ──────────────────
-    // Swaps the video without tearing down the iframe. No blank gap, no
-    // re-initialization cost. onStateChange (already registered) fires for
-    // the new video's PLAYING/ENDED events.
-    if (ytPlayerInstance.current) {
-      try {
-        const player = ytPlayerInstance.current;
-        if (startMuted) player.mute(); else player.unMute();
-        player.setVolume(volume);
-        if (sync.isPlaying) {
-          player.loadVideoById({ videoId: currentSong.sourceId, startSeconds: targetTime });
-        } else {
-          player.cueVideoById({ videoId: currentSong.sourceId, startSeconds: targetTime });
-          setSyncReady(true);
-        }
-        return;
-      } catch (_) { // eslint-disable-line no-unused-vars
-        try { ytPlayerInstance.current.destroy(); } catch (_) {}
-        ytPlayerInstance.current = null;
-      }
-    }
-
-    // ── Slow path: create fresh player (first load or after error) ───────────
-    // Load directly at targetTime. No pre-heat — loading 12s before just wastes
-    // bandwidth on slow connections; YouTube has to fetch those extra segments
-    // before it can reach the target, making the initial sync take 3-8s longer.
     ytPlayerInstance.current = new window.YT.Player(ytPlayerDivRef.current, {
       height: '200',
       width: '100%',
       videoId: currentSong.sourceId,
       playerVars: {
-        autoplay: 1,
-        mute: startMuted ? 1 : 0,
-        start: Math.floor(targetTime),
+        autoplay: sync.isPlaying ? 1 : 0,
+        mute: 0,
+        start: Math.floor(sync.currentTime || 0),
         enablejsapi: 1, playsinline: 1,
         controls: 0, modestbranding: 1, rel: 0,
         origin: window.location.origin,
@@ -217,15 +144,11 @@ const ChannelPage = () => {
       events: {
         onReady: (e) => {
           e.target.setVolume(volume);
-          if (startMuted) e.target.mute(); else e.target.unMute();
+          if (isMuted) e.target.mute(); else e.target.unMute();
           const dur = e.target.getDuration();
           if (dur) setDuration(dur);
-
           if (sync.isPlaying) {
-            // Fine-tune: absorb time elapsed between effect and onReady (~0.5-2s).
-            // seekTo is cheap here because we're already at floor(targetTime).
-            const liveNow = getExpectedTime();
-            try { e.target.seekTo(liveNow, true); } catch (_) {}
+            try { e.target.seekTo(sync.currentTime || 0, true); } catch (_) {}
             try { e.target.playVideo(); } catch (_) {}
           } else {
             try { e.target.seekTo(sync.currentTime || 0, true); } catch (_) {}
@@ -237,7 +160,12 @@ const ChannelPage = () => {
           const PS = window.YT.PlayerState;
           if (e.data === PS.PLAYING) {
             setSyncReady(true);
-            startDriftLoop();
+            clearInterval(timeInterval.current);
+            timeInterval.current = setInterval(() => {
+              if (ytPlayerInstance.current?.getCurrentTime) {
+                setCurrentTime(ytPlayerInstance.current.getCurrentTime());
+              }
+            }, 500);
           }
           if (e.data === PS.PAUSED) {
             clearInterval(timeInterval.current);
@@ -258,88 +186,6 @@ const ChannelPage = () => {
     return () => clearInterval(timeInterval.current);
   }, [currentSong?._id, ytApiReady]);
 
-  // ─── DRIFT CORRECTION ────────────────────────────────────────────────────────
-  // Runs every 1s while playing. Uses ONLY setPlaybackRate — never seekTo.
-  // seekTo on an already-playing stream forces YouTube to drop buffer and
-  // re-fetch, which is exactly the buffering users complained about.
-  //
-  // Rate correction converges silently:
-  //   < 0.3s drift  → do nothing (imperceptible)
-  //   0.3–5s drift  → rate ± up to 10% (catches up over ~10-50s, invisible)
-  //   > 5s drift    → one hard seek (extreme case: tab was sleeping, CPU throttle)
-  //
-  // The "Go Live" button handles voluntary snap-to-live for users who notice lag.
-  const LAG_THRESHOLD = 5;
-  const startDriftLoop = useCallback(() => {
-    clearInterval(timeInterval.current);
-    timeInterval.current = setInterval(() => {
-      const player = ytPlayerInstance.current;
-      if (!player?.getCurrentTime) return;
-      const actual = player.getCurrentTime();
-      setCurrentTime(actual);
-      const d = player.getDuration?.();
-      if (d && d > 0) setDuration(d);
-
-      const sv = serverSyncRef.current;
-      if (!sv?.isPlaying) {
-        setLagSeconds(0);
-        try { if ((player.getPlaybackRate?.() ?? 1) !== 1) player.setPlaybackRate(1); } catch (_) {}
-        return;
-      }
-
-      const expected = getExpectedTime();
-      const drift = expected - actual; // positive = we're behind
-      const abs = Math.abs(drift);
-
-      setLagSeconds(drift > LAG_THRESHOLD ? Math.round(drift) : 0);
-
-      try {
-        if (abs > 5) {
-          // Last resort — extreme lag (sleeping tab, heavy CPU throttle)
-          player.seekTo(expected, true);
-          player.setPlaybackRate(1);
-        } else if (abs > 0.3) {
-          // Rate nudge — converges without any visible stutter or re-buffer
-          // Scale rate proportionally: 0.3s → 1.015x, 2s → 1.10x, 5s → 1.10x (capped)
-          const adjustment = Math.min(abs * 0.05, 0.10);
-          const rate = drift > 0 ? 1 + adjustment : 1 - adjustment;
-          if (Math.abs((player.getPlaybackRate?.() ?? 1) - rate) > 0.005) {
-            player.setPlaybackRate(rate);
-          }
-        } else {
-          // In sync — restore 1x so playback sounds normal
-          if ((player.getPlaybackRate?.() ?? 1) !== 1) player.setPlaybackRate(1);
-        }
-      } catch (_) {}
-    }, 1000);
-  }, [getExpectedTime]);
-
-  // Manual unmute — user tap on the "Tap to unmute" pill
-  const handleUnmuteRequest = () => {
-    userInteractedRef.current = true;
-    if (ytPlayerInstance.current) {
-      try {
-        ytPlayerInstance.current.unMute();
-        ytPlayerInstance.current.setVolume(volume || 80);
-      } catch (_) {}
-    }
-    setNeedsUnmute(false);
-    setIsMuted(false);
-  };
-
-  // Go Live — snap to the current server position immediately.
-  // Adds a small +0.5s ahead-seek to absorb the YouTube seek+buffer delay.
-  const handleGoLive = () => {
-    const expected = getExpectedTime();
-    if (!ytPlayerInstance.current) return;
-    try {
-      ytPlayerInstance.current.seekTo(expected + 0.5, true);
-      ytPlayerInstance.current.setPlaybackRate(1);
-      if (!isPlaying) ytPlayerInstance.current.playVideo();
-    } catch (_) {}
-    setLagSeconds(0);
-  };
-
   // Fetch channel data
   useEffect(() => {
     const fetchChannel = async () => {
@@ -355,8 +201,6 @@ const ChannelPage = () => {
         const pb = res.data.channel.playbackState;
         const pbPlaying = pb?.isPlaying || false;
 
-        // Use playbackState.startedAt (set by server when play started) as the precise origin.
-        // Fall back to updatedAt if missing.
         const originIso = pb?.startedAt || pb?.updatedAt;
         const originMs = originIso ? new Date(originIso).getTime() : Date.now();
         const correctedTime = pbPlaying
@@ -368,14 +212,9 @@ const ChannelPage = () => {
         setCurrentTime(correctedTime);
 
         if (song) {
-          const seed = { isPlaying: pbPlaying, currentTime: correctedTime, serverTime: serverNow() };
-          if (!pendingSyncRef.current) pendingSyncRef.current = seed;
-          if (!serverSyncRef.current) {
-            serverSyncRef.current = { time: correctedTime, serverTime: serverNow(), isPlaying: pbPlaying };
-          }
+          pendingSyncRef.current = { isPlaying: pbPlaying, currentTime: correctedTime };
         }
 
-        // Seed online users from DB isOnline field
         const online = new Set(
           (res.data.channel.members || []).filter(m => m.isOnline).map(m => m._id)
         );
@@ -407,7 +246,8 @@ const ChannelPage = () => {
     const handleDeleted = ({ messageId }) => {
       setMessages(prev => prev.filter(m => m._id !== messageId));
     };
-    const handlePlayerState = ({ isPlaying: playing, currentTime: ct, song, serverTime }) => {
+
+    const handlePlayerState = ({ isPlaying: playing, currentTime: ct, song }) => {
       setIsPlaying(playing);
       setCurrentTime(ct || 0);
       if (!playing) setSyncReady(true);
@@ -419,9 +259,6 @@ const ChannelPage = () => {
       if (song !== undefined) {
         if (songChanging) {
           setSongHistory(prev => [...prev.slice(-9), currentSongRef.current]);
-          // Pause current video immediately so users don't see the wrong song for
-          // the ~100ms until React re-renders and the YT effect fires.
-          // (pauseVideo not stopVideo — stopVideo can trigger ENDED → queue:next)
           if (ytPlayerInstance.current) {
             try { ytPlayerInstance.current.pauseVideo(); } catch (_) {}
           }
@@ -429,74 +266,55 @@ const ChannelPage = () => {
         setCurrentSong(song);
       }
 
-      // Server-aligned snapshot for drift correction. serverTime is the server's clock
-      // at the moment ct was sampled — using it (with our skew) gives sub-100ms accuracy.
-      const sTime = serverTime || serverNow();
-      serverSyncRef.current = { time: ct || 0, serverTime: sTime, isPlaying: playing };
-      pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0, serverTime: sTime };
+      pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
 
-      if (songChanging) return; // YT effect will apply pendingSyncRef via loadVideoById
+      if (songChanging) return;
 
-      // Same song — if player exists, push the change directly.
-      // IMPORTANT: if this event is the echo of our own action (we sent it < 2s ago),
-      // skip the seekTo — calling seekTo on an already-playing stream forces YouTube
-      // to re-buffer, which is what the owner experiences as "buffering on my own click".
       if (ytPlayerInstance.current) {
         try {
           const state = ytPlayerInstance.current.getPlayerState?.();
           if (state !== -1 && state != null) {
-            const isSelfEcho = Date.now() - selfControlledAt.current < 2000;
-            const actual = ytPlayerInstance.current.getCurrentTime?.() ?? 0;
-            const target = ct || 0;
-            // Seek only if: someone else triggered it AND we're meaningfully out of position
-            if (!isSelfEcho && Math.abs(actual - target) > 1.5) {
-              ytPlayerInstance.current.seekTo(target, true);
-            }
+            ytPlayerInstance.current.seekTo(ct || 0, true);
             if (playing) ytPlayerInstance.current.playVideo();
             else ytPlayerInstance.current.pauseVideo();
             pendingSyncRef.current = null;
           }
-        } catch (e) { /* leave pendingSyncRef */ }
+        } catch (e) {}
       }
     };
-    // Heartbeat: server broadcasts authoritative state every 5s. We update
-    // serverSyncRef so the drift loop pulls things back into alignment automatically.
-    // Also a recovery path: if the joiner missed player:state, the heartbeat brings them in.
-    const handleHeartbeat = ({ isPlaying: playing, currentTime: ct, songId, serverTime }) => {
-      const sTime = serverTime || serverNow();
-      serverSyncRef.current = { time: ct || 0, serverTime: sTime, isPlaying: playing };
 
-      // Recovery: heartbeat song doesn't match what we're showing → request full state
+    // Heartbeat: recover if song is wrong, or correct big drift
+    const handleHeartbeat = ({ isPlaying: playing, currentTime: ct, songId }) => {
       const localSongId = currentSongRef.current?._id;
       if (songId && localSongId && String(songId) !== String(localSongId)) {
         socketRef.current?.emit('player:request-sync', { channelId });
         return;
       }
-      // Recovery: nothing playing locally but server has a song → request full state
       if (songId && !localSongId) {
         socketRef.current?.emit('player:request-sync', { channelId });
         return;
       }
-      // Drift loop will apply the correction; no direct seek here
+      if (ytPlayerInstance.current && playing) {
+        try {
+          const actual = ytPlayerInstance.current.getCurrentTime?.() ?? 0;
+          if (Math.abs(actual - ct) > 3) {
+            ytPlayerInstance.current.seekTo(ct, true);
+          }
+        } catch (_) {}
+      }
     };
-    const handlePlayerSeek = ({ currentTime: ct, serverTime }) => {
+
+    const handlePlayerSeek = ({ currentTime: ct }) => {
       setCurrentTime(ct);
-      const sTime = serverTime || serverNow();
-      if (serverSyncRef.current) {
-        serverSyncRef.current = { ...serverSyncRef.current, time: ct, serverTime: sTime };
-      }
-      // Skip seek if we sent this (we already seeked locally in handleSeekCommit)
-      const isSelfEcho = Date.now() - selfControlledAt.current < 2000;
-      if (!isSelfEcho) {
-        if (ytPlayerInstance.current) {
-          try { ytPlayerInstance.current.seekTo(ct, true); } catch (e) {}
-        } else {
-          pendingSyncRef.current = pendingSyncRef.current
-            ? { ...pendingSyncRef.current, currentTime: ct, serverTime: sTime }
-            : { isPlaying: false, currentTime: ct, serverTime: sTime };
-        }
+      if (ytPlayerInstance.current) {
+        try { ytPlayerInstance.current.seekTo(ct, true); } catch (e) {}
+      } else {
+        pendingSyncRef.current = pendingSyncRef.current
+          ? { ...pendingSyncRef.current, currentTime: ct }
+          : { isPlaying: false, currentTime: ct };
       }
     };
+
     const handleQueueUpdate = (q) => setQueue(q);
     const handleRepeatSync = ({ isRepeat: r }) => setIsRepeat(r);
     const handleUserJoined = ({ user: joinedUser }) => {
@@ -591,7 +409,6 @@ const ChannelPage = () => {
 
   // ── Player actions ────────────────────────────────────────────────────────
   const togglePlayback = () => {
-    selfControlledAt.current = Date.now();
     if (isPlaying) {
       socket?.emit('player:pause', { channelId, currentTime });
     } else {
@@ -600,12 +417,10 @@ const ChannelPage = () => {
   };
 
   const skipNext = () => {
-    selfControlledAt.current = Date.now();
     socket?.emit('queue:next', { channelId });
   };
 
   const playPrevious = () => {
-    selfControlledAt.current = Date.now();
     if (currentTime > 3) {
       socket?.emit('player:seek', { channelId, currentTime: 0 });
       socket?.emit('player:play', { channelId, songId: currentSong?._id, currentTime: 0 });
@@ -618,7 +433,6 @@ const ChannelPage = () => {
 
   const handleSeekCommit = (e) => {
     const time = parseFloat(e.target.value);
-    selfControlledAt.current = Date.now();
     setCurrentTime(time);
     setIsSeeking(false);
     socket?.emit('player:seek', { channelId, currentTime: time });
@@ -785,7 +599,6 @@ const ChannelPage = () => {
           <button className="btn btn-secondary btn-sm" onClick={() => { setShowImportPlaylist(true); fetchMyPlaylists(); }}>
             📋 Import Playlist
           </button>
-          {/* Audio/Video mode — admin sets it, affects all members */}
           {isAdmin ? (
             <button
               className="btn btn-secondary btn-sm"
@@ -881,9 +694,6 @@ const ChannelPage = () => {
                 {/* YouTube player */}
                 {currentSong.source === 'youtube' && (
                   <div style={{ marginBottom: 'var(--space-4)', borderRadius: 'var(--radius-md)', overflow: 'hidden', position: 'relative', minHeight: 200 }}>
-
-                    {/* YT iframe — ALWAYS mounted (never display:none, which can break the API).
-                        In audio mode, it's still loaded but hidden behind the visualiser overlay. */}
                     <div
                       ref={ytPlayerDivRef}
                       style={{
@@ -893,7 +703,7 @@ const ChannelPage = () => {
                       }}
                     />
 
-                    {/* Audio-only visualiser (overlays the iframe) */}
+                    {/* Audio-only visualiser */}
                     {viewMode === 'audio' && (
                       <div style={{
                         position: 'absolute', inset: 0,
@@ -914,7 +724,7 @@ const ChannelPage = () => {
                       </div>
                     )}
 
-                    {/* Sync loading overlay — shown until YT player actually starts playing or is paused */}
+                    {/* Sync loading overlay */}
                     {!syncReady && (
                       <div style={{
                         position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -925,50 +735,6 @@ const ChannelPage = () => {
                         <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Syncing playback...</div>
                       </div>
                     )}
-
-                    {/* Tap-to-unmute pill — non-blocking, video already plays muted */}
-                    {needsUnmute && (
-                      <button
-                        onClick={handleUnmuteRequest}
-                        style={{
-                          position: 'absolute', top: 12, right: 12, zIndex: 6,
-                          display: 'flex', alignItems: 'center', gap: 6,
-                          padding: '8px 14px', borderRadius: 999,
-                          background: 'rgba(0,0,0,0.85)', border: '1px solid rgba(255,255,255,0.15)',
-                          color: 'var(--text-primary)', cursor: 'pointer',
-                          fontSize: 13, fontWeight: 600,
-                          boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-                        }}
-                        title="Browser blocked sound — tap to unmute"
-                      >
-                        🔇 Tap to unmute
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* Go Live — appears when this client is > 5s behind the server */}
-                {lagSeconds > 0 && isPlaying && (
-                  <div style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    padding: '6px 12px', marginBottom: 'var(--space-2)',
-                    background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.3)',
-                    borderRadius: 'var(--radius-md)',
-                  }}>
-                    <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-                      You are <strong style={{ color: '#f87171' }}>{lagSeconds}s behind</strong> the channel
-                    </span>
-                    <button
-                      className="btn btn-sm"
-                      onClick={handleGoLive}
-                      style={{
-                        background: '#ef4444', color: '#fff', border: 'none',
-                        padding: '4px 14px', borderRadius: 999, fontWeight: 700, fontSize: 13,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      ⚡ Go Live
-                    </button>
                   </div>
                 )}
 
@@ -994,14 +760,12 @@ const ChannelPage = () => {
 
                 {/* Controls */}
                 <div className="player-controls">
-                  {/* Left: Shuffle */}
                   <button
                     className={`player-ctrl-btn player-mode-btn${isShuffle ? ' player-ctrl-active' : ''}`}
                     onClick={toggleShuffle}
                     title={isShuffle ? 'Shuffle: On' : 'Shuffle: Off'}
                   >🔀 <span className="player-mode-label">Shuffle</span></button>
 
-                  {/* Center: Prev / Play / Next */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flex: 1, justifyContent: 'center' }}>
                     <button
                       className="player-ctrl-btn"
@@ -1021,7 +785,6 @@ const ChannelPage = () => {
                     <button className="player-ctrl-btn" onClick={skipNext} title="Skip next" disabled={!canControl}>⏭</button>
                   </div>
 
-                  {/* Right: Repeat */}
                   <button
                     className={`player-ctrl-btn player-mode-btn${isRepeat ? ' player-ctrl-active' : ''}`}
                     onClick={() => {
@@ -1050,12 +813,7 @@ const ChannelPage = () => {
                     step={1}
                     value={isMuted ? 0 : volume}
                     onChange={handleVolumeChange}
-                    style={{
-                      flex: 1,
-                      height: 4,
-                      accentColor: 'var(--accent-primary)',
-                      cursor: 'pointer',
-                    }}
+                    style={{ flex: 1, height: 4, accentColor: 'var(--accent-primary)', cursor: 'pointer' }}
                     title={`Volume: ${isMuted ? 0 : volume}%`}
                   />
                   <span style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 32, textAlign: 'right' }}>
@@ -1148,7 +906,6 @@ const ChannelPage = () => {
 
         {/* Right: Chat + Members (tabbed) */}
         <div className="chat-container" style={{ height: '100%' }}>
-          {/* Tab bar */}
           <div className="right-panel-tabs">
             <button
               className={`right-panel-tab${rightTab === 'chat' ? ' active' : ''}`}
