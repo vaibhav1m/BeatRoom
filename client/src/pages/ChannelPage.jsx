@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
 import { useToast } from '../context/ToastContext';
 import { usePlayer } from '../context/PlayerContext';
+import { useSyncEngine } from '../hooks/useSyncEngine';
 import api from '../services/api';
 import { formatTimeAgo, getInitials, formatDuration } from '../utils/helpers';
 import { getAvatarColor, EMOJIS } from '../utils/constants';
@@ -15,6 +16,12 @@ const ChannelPage = () => {
   const { toast } = useToast();
   const { setCurrentSong: setGlobalSong, setIsPlaying: setGlobalPlaying, setCurrentChannelId: setGlobalChannelId, setChannelName: setGlobalChannelName } = usePlayer();
   const navigate = useNavigate();
+
+  const { onPlayerReady, markSelfControlled, startDriftLoop, stopDriftLoop } = useSyncEngine({
+    socket,
+    playerRef: ytPlayerInstance,
+    channelId,
+  });
 
   useEffect(() => {
     setActiveChannelId(channelId);
@@ -136,25 +143,23 @@ const ChannelPage = () => {
       playerVars: {
         autoplay: sync.isPlaying ? 1 : 0,
         mute: 0,
+        // start is a rough hint — onPlayerReady will seekTo the accurate position
         start: Math.floor(sync.currentTime || 0),
         enablejsapi: 1, playsinline: 1,
         controls: 0, modestbranding: 1, rel: 0,
         origin: window.location.origin,
       },
       events: {
-        onReady: (e) => {
+        onReady: async (e) => {
           e.target.setVolume(volume);
           if (isMuted) e.target.mute(); else e.target.unMute();
           const dur = e.target.getDuration();
           if (dur) setDuration(dur);
-          if (sync.isPlaying) {
-            try { e.target.seekTo(sync.currentTime || 0, true); } catch (_) {}
-            try { e.target.playVideo(); } catch (_) {}
-          } else {
-            try { e.target.seekTo(sync.currentTime || 0, true); } catch (_) {}
-            try { e.target.pauseVideo(); } catch (_) {}
-            setSyncReady(true);
-          }
+          // Hand off to the sync engine — it re-syncs the clock and fetches
+          // fresh startedAt from the server at this exact moment, so the seekTo
+          // target is milliseconds old rather than 1–3 seconds old.
+          await onPlayerReady(sync);
+          setSyncReady(true);
         },
         onStateChange: (e) => {
           const PS = window.YT.PlayerState;
@@ -166,12 +171,15 @@ const ChannelPage = () => {
                 setCurrentTime(ytPlayerInstance.current.getCurrentTime());
               }
             }, 500);
+            startDriftLoop();
           }
           if (e.data === PS.PAUSED) {
             clearInterval(timeInterval.current);
+            stopDriftLoop();
           }
           if (e.data === PS.ENDED) {
             clearInterval(timeInterval.current);
+            stopDriftLoop();
             if (isRepeatRef.current) {
               e.target.seekTo(0, true);
               e.target.playVideo();
@@ -247,6 +255,8 @@ const ChannelPage = () => {
       setMessages(prev => prev.filter(m => m._id !== messageId));
     };
 
+    // UI state update only — player control (seekTo, rate, play/pause) is
+    // handled by useSyncEngine which also listens to player:state.
     const handlePlayerState = ({ isPlaying: playing, currentTime: ct, song }) => {
       setIsPlaying(playing);
       setCurrentTime(ct || 0);
@@ -259,60 +269,18 @@ const ChannelPage = () => {
       if (song !== undefined) {
         if (songChanging) {
           setSongHistory(prev => [...prev.slice(-9), currentSongRef.current]);
-          if (ytPlayerInstance.current) {
-            try { ytPlayerInstance.current.pauseVideo(); } catch (_) {}
-          }
         }
         setCurrentSong(song);
       }
 
+      // Keep pendingSyncRef current so onPlayerReady (called at YT onReady time)
+      // always has a reasonable fallback if the socket ack hasn't returned yet.
       pendingSyncRef.current = { isPlaying: playing, currentTime: ct || 0 };
-
-      if (songChanging) return;
-
-      if (ytPlayerInstance.current) {
-        try {
-          const state = ytPlayerInstance.current.getPlayerState?.();
-          if (state !== -1 && state != null) {
-            ytPlayerInstance.current.seekTo(ct || 0, true);
-            if (playing) ytPlayerInstance.current.playVideo();
-            else ytPlayerInstance.current.pauseVideo();
-            pendingSyncRef.current = null;
-          }
-        } catch (e) {}
-      }
     };
 
-    // Heartbeat: recover if song is wrong, or correct big drift
-    const handleHeartbeat = ({ isPlaying: playing, currentTime: ct, songId }) => {
-      const localSongId = currentSongRef.current?._id;
-      if (songId && localSongId && String(songId) !== String(localSongId)) {
-        socketRef.current?.emit('player:request-sync', { channelId });
-        return;
-      }
-      if (songId && !localSongId) {
-        socketRef.current?.emit('player:request-sync', { channelId });
-        return;
-      }
-      if (ytPlayerInstance.current && playing) {
-        try {
-          const actual = ytPlayerInstance.current.getCurrentTime?.() ?? 0;
-          if (Math.abs(actual - ct) > 3) {
-            ytPlayerInstance.current.seekTo(ct, true);
-          }
-        } catch (_) {}
-      }
-    };
-
+    // UI only — useSyncEngine handles the actual seekTo on player:seek
     const handlePlayerSeek = ({ currentTime: ct }) => {
       setCurrentTime(ct);
-      if (ytPlayerInstance.current) {
-        try { ytPlayerInstance.current.seekTo(ct, true); } catch (e) {}
-      } else {
-        pendingSyncRef.current = pendingSyncRef.current
-          ? { ...pendingSyncRef.current, currentTime: ct }
-          : { isPlaying: false, currentTime: ct };
-      }
     };
 
     const handleQueueUpdate = (q) => setQueue(q);
@@ -338,7 +306,6 @@ const ChannelPage = () => {
     socket.on('chat:reaction-update', handleReaction);
     socket.on('chat:deleted', handleDeleted);
     socket.on('player:state', handlePlayerState);
-    socket.on('player:heartbeat', handleHeartbeat);
     socket.on('player:seek', handlePlayerSeek);
     socket.on('queue:updated', handleQueueUpdate);
     socket.on('player:repeat', handleRepeatSync);
@@ -358,7 +325,6 @@ const ChannelPage = () => {
       socket.off('chat:reaction-update', handleReaction);
       socket.off('chat:deleted', handleDeleted);
       socket.off('player:state', handlePlayerState);
-      socket.off('player:heartbeat', handleHeartbeat);
       socket.off('player:seek', handlePlayerSeek);
       socket.off('queue:updated', handleQueueUpdate);
       socket.off('player:repeat', handleRepeatSync);
@@ -409,6 +375,7 @@ const ChannelPage = () => {
 
   // ── Player actions ────────────────────────────────────────────────────────
   const togglePlayback = () => {
+    markSelfControlled();
     if (isPlaying) {
       socket?.emit('player:pause', { channelId, currentTime });
     } else {
@@ -417,10 +384,12 @@ const ChannelPage = () => {
   };
 
   const skipNext = () => {
+    markSelfControlled();
     socket?.emit('queue:next', { channelId });
   };
 
   const playPrevious = () => {
+    markSelfControlled();
     if (currentTime > 3) {
       socket?.emit('player:seek', { channelId, currentTime: 0 });
       socket?.emit('player:play', { channelId, songId: currentSong?._id, currentTime: 0 });
@@ -433,6 +402,7 @@ const ChannelPage = () => {
 
   const handleSeekCommit = (e) => {
     const time = parseFloat(e.target.value);
+    markSelfControlled();
     setCurrentTime(time);
     setIsSeeking(false);
     socket?.emit('player:seek', { channelId, currentTime: time });

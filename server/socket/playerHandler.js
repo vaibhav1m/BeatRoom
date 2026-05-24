@@ -1,15 +1,12 @@
 const Channel = require('../models/Channel');
 const Song = require('../models/Song');
 
-// Helper: compute accurate current playback time from stored state
 const computeSyncedTime = (playbackState) => {
   if (!playbackState) return 0;
   if (!playbackState.isPlaying) return playbackState.currentTime || 0;
-  // Use startedAt for accuracy (single subtraction, no accumulated drift)
   if (playbackState.startedAt) {
     return Math.max(0, (Date.now() - new Date(playbackState.startedAt).getTime()) / 1000);
   }
-  // Fallback: updatedAt + currentTime
   const elapsed = (Date.now() - new Date(playbackState.updatedAt).getTime()) / 1000;
   return Math.max(0, (playbackState.currentTime || 0) + elapsed);
 };
@@ -25,7 +22,6 @@ const playerHandler = (io, socket) => {
         return socket.emit('error', { message: 'Only admin can control playback' });
       }
       const ct = currentTime || 0;
-      // startedAt = timestamp that represents "when would 0:00 have been played"
       const startedAt = new Date(Date.now() - ct * 1000);
       channel.currentSong = songId;
       channel.playbackState = { isPlaying: true, currentTime: ct, updatedAt: new Date(), startedAt };
@@ -33,7 +29,11 @@ const playerHandler = (io, socket) => {
       if (songId) await Song.findByIdAndUpdate(songId, { $inc: { playCount: 1 } });
       const song = songId ? await Song.findById(songId) : null;
       io.to(`channel:${channelId}`).emit('player:state', {
-        isPlaying: true, currentTime: ct, song,
+        isPlaying: true,
+        currentTime: ct,
+        startedAt: startedAt.getTime(), // ms number for client clock math
+        action: 'play',
+        song,
         controlledBy: socket.user.username,
         serverTime: Date.now(),
       });
@@ -51,16 +51,20 @@ const playerHandler = (io, socket) => {
       if (!channel.allowAllControl && channel.admin.toString() !== socket.user._id.toString() && socket.user.role !== 'superadmin') {
         return socket.emit('error', { message: 'Only admin can control playback' });
       }
-      // Preserve startedAt when pausing so we know where we were
+      const prevStartedAt = channel.playbackState.startedAt;
       channel.playbackState = {
         isPlaying: false,
         currentTime,
         updatedAt: new Date(),
-        startedAt: channel.playbackState.startedAt,
+        startedAt: prevStartedAt,
       };
       await channel.save();
       io.to(`channel:${channelId}`).emit('player:state', {
-        isPlaying: false, currentTime, controlledBy: socket.user.username,
+        isPlaying: false,
+        currentTime,
+        startedAt: prevStartedAt ? new Date(prevStartedAt).getTime() : null,
+        action: 'pause',
+        controlledBy: socket.user.username,
         serverTime: Date.now(),
       });
     } catch (err) {
@@ -77,7 +81,6 @@ const playerHandler = (io, socket) => {
       if (!channel.allowAllControl && channel.admin.toString() !== socket.user._id.toString() && socket.user.role !== 'superadmin') {
         return socket.emit('error', { message: 'Only admin can control playback' });
       }
-      // Recalculate startedAt for the new position
       const startedAt = channel.playbackState.isPlaying
         ? new Date(Date.now() - currentTime * 1000)
         : channel.playbackState.startedAt;
@@ -89,7 +92,9 @@ const playerHandler = (io, socket) => {
       };
       await channel.save();
       io.to(`channel:${channelId}`).emit('player:seek', {
-        currentTime, controlledBy: socket.user.username,
+        currentTime,
+        startedAt: startedAt ? new Date(startedAt).getTime() : null, // ms for client
+        controlledBy: socket.user.username,
         serverTime: Date.now(),
       });
     } catch (err) {
@@ -97,15 +102,18 @@ const playerHandler = (io, socket) => {
     }
   });
 
-  // Request sync (fallback — channel:join now handles primary sync)
+  // Request sync (fallback used by heartbeat recovery path)
   socket.on('player:request-sync', async (data) => {
     try {
       const { channelId } = data;
       const channel = await Channel.findById(channelId).populate('currentSong');
       if (channel && channel.currentSong) {
+        const pb = channel.playbackState;
         socket.emit('player:state', {
-          isPlaying: channel.playbackState.isPlaying,
-          currentTime: computeSyncedTime(channel.playbackState),
+          isPlaying: pb.isPlaying,
+          currentTime: computeSyncedTime(pb),
+          startedAt: pb.startedAt ? new Date(pb.startedAt).getTime() : null,
+          action: 'sync',
           song: channel.currentSong,
           serverTime: Date.now(),
         });
@@ -115,7 +123,7 @@ const playerHandler = (io, socket) => {
     }
   });
 
-  // Toggle repeat mode — broadcast to all channel members
+  // Toggle repeat mode — broadcast only, no DB persistence
   socket.on('player:repeat', ({ channelId, isRepeat }) => {
     socket.to(`channel:${channelId}`).emit('player:repeat', { isRepeat });
   });

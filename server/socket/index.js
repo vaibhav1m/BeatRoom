@@ -8,7 +8,6 @@ const notificationHandler = require('./notificationHandler');
 
 const Channel = require('../models/Channel');
 
-// Helper: compute accurate current playback time
 const computeSyncedTime = (pb) => {
   if (!pb || !pb.isPlaying) return pb?.currentTime || 0;
   if (pb.startedAt) return Math.max(0, (Date.now() - new Date(pb.startedAt).getTime()) / 1000);
@@ -17,7 +16,6 @@ const computeSyncedTime = (pb) => {
 };
 
 const setupSocketHandlers = (io) => {
-  // Auth middleware for socket connections
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token;
@@ -35,21 +33,35 @@ const setupSocketHandlers = (io) => {
   io.on('connection', async (socket) => {
     console.log(`🔌 ${socket.user.username} connected (${socket.id})`);
 
-    // Update online status
     await User.findByIdAndUpdate(socket.user._id, { isOnline: true });
     io.emit('user:online', { userId: socket.user._id, username: socket.user.username });
 
-    // Clock sync — client uses ack to compute server-vs-client skew
+    // Clock sync — send plain ms timestamp so client can compute skew
     socket.on('time:sync', (clientTime, ack) => {
-      if (typeof ack === 'function') ack({ serverTime: Date.now(), clientTime });
+      if (typeof ack === 'function') ack(Date.now());
+    });
+
+    // Fresh authoritative state fetched at the exact moment YT player fires onReady.
+    // Using a socket ack (not REST) gives lower latency and fresher data.
+    socket.on('player:request-state', async ({ channelId }, ack) => {
+      if (typeof ack !== 'function') return;
+      try {
+        const channel = await Channel.findById(channelId).populate('currentSong').lean();
+        if (!channel || !channel.playbackState?.isPlaying) return ack(null);
+        const pb = channel.playbackState;
+        ack({
+          startedAt:   pb.startedAt ? new Date(pb.startedAt).getTime() : null,
+          isPlaying:   pb.isPlaying,
+          currentSong: channel.currentSong,
+        });
+      } catch (e) {
+        ack(null);
+      }
     });
 
     // Channel join/leave
     socket.on('channel:join', async (channelId) => {
       const roomName = `channel:${channelId}`;
-      // Guard: socket.rooms already contains this room in React StrictMode's
-      // double-invocation or when the client emits channel:join twice.
-      // Skip the broadcast but still send sync state.
       const alreadyInRoom = socket.rooms.has(roomName);
       socket.join(roomName);
       socket.currentChannel = channelId;
@@ -65,16 +77,20 @@ const setupSocketHandlers = (io) => {
         });
       }
 
-      // Proactively push current playback state to the joining socket.
-      // Includes serverTime so the client can compensate for network latency precisely.
+      // Push current song to the joining socket so the client can start loading
+      // the YT player. The actual seek position is fetched fresh via player:request-state
+      // at onReady time — this push is just for song metadata.
       try {
         const channel = await Channel.findById(channelId).populate('currentSong');
         if (channel?.currentSong) {
+          const pb = channel.playbackState;
           socket.emit('player:state', {
-            isPlaying: channel.playbackState.isPlaying,
-            currentTime: computeSyncedTime(channel.playbackState),
-            song: channel.currentSong,
-            serverTime: Date.now(),
+            isPlaying:   pb.isPlaying,
+            currentTime: computeSyncedTime(pb),
+            startedAt:   pb.startedAt ? new Date(pb.startedAt).getTime() : null,
+            action:      'join',
+            song:        channel.currentSong,
+            serverTime:  Date.now(),
           });
         }
       } catch (e) {
@@ -95,28 +111,24 @@ const setupSocketHandlers = (io) => {
         timestamp: new Date(),
       });
       socket.currentChannel = null;
-      // Auto-pause if channel has no more online members
       try {
         const room = io.sockets.adapter.rooms.get(`channel:${channelId}`);
         const onlineCount = room ? room.size : 0;
         if (onlineCount === 0) {
-          const Channel = require('../models/Channel');
           await Channel.findByIdAndUpdate(channelId, {
             'playbackState.isPlaying': false,
             'playbackState.updatedAt': new Date(),
           });
-          io.to(`channel:${channelId}`).emit('player:state', { isPlaying: false, currentTime: 0 });
+          io.to(`channel:${channelId}`).emit('player:state', { isPlaying: false, currentTime: 0, action: 'pause' });
         }
       } catch (e) {}
     });
 
-    // Set up feature handlers
     chatHandler(io, socket);
     playerHandler(io, socket);
     queueHandler(io, socket);
     notificationHandler(io, socket);
 
-    // Disconnect
     socket.on('disconnect', async () => {
       await User.findByIdAndUpdate(socket.user._id, { isOnline: false, lastSeen: new Date() });
       io.emit('user:offline', { userId: socket.user._id });
@@ -128,7 +140,6 @@ const setupSocketHandlers = (io) => {
           const room = io.sockets.adapter.rooms.get(`channel:${socket.currentChannel}`);
           const onlineCount = room ? room.size : 0;
           if (onlineCount === 0) {
-            const Channel = require('../models/Channel');
             await Channel.findByIdAndUpdate(socket.currentChannel, {
               'playbackState.isPlaying': false,
               'playbackState.updatedAt': new Date(),
@@ -140,9 +151,8 @@ const setupSocketHandlers = (io) => {
     });
   });
 
-  // Periodic heartbeat: every 5s, broadcast authoritative playback state to every
-  // active channel room. This is the safety net — even if a join-time push is dropped
-  // or a client misses an event, they will be brought back into sync within 5s.
+  // Heartbeat every 5s — now includes startedAt so clients can recompute position
+  // using the invariant rather than adding elapsed time to a stale currentTime.
   setInterval(async () => {
     try {
       const rooms = io.sockets.adapter.rooms;
@@ -160,11 +170,13 @@ const setupSocketHandlers = (io) => {
 
       for (const ch of channels) {
         if (!ch.currentSong) continue;
+        const pb = ch.playbackState;
         io.to(`channel:${ch._id}`).emit('player:heartbeat', {
-          isPlaying: ch.playbackState.isPlaying,
-          currentTime: computeSyncedTime(ch.playbackState),
-          songId: String(ch.currentSong._id),
-          serverTime: Date.now(),
+          isPlaying:   pb.isPlaying,
+          currentTime: computeSyncedTime(pb),
+          startedAt:   pb.startedAt ? new Date(pb.startedAt).getTime() : null,
+          songId:      String(ch.currentSong._id),
+          serverTime:  Date.now(),
         });
       }
     } catch (e) {
