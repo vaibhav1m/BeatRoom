@@ -17,12 +17,6 @@ const ChannelPage = () => {
   const { setCurrentSong: setGlobalSong, setIsPlaying: setGlobalPlaying, setCurrentChannelId: setGlobalChannelId, setChannelName: setGlobalChannelName } = usePlayer();
   const navigate = useNavigate();
 
-  const { onPlayerReady, markSelfControlled, startDriftLoop, stopDriftLoop } = useSyncEngine({
-    socket,
-    playerRef: ytPlayerInstance,
-    channelId,
-  });
-
   useEffect(() => {
     setActiveChannelId(channelId);
     setSyncReady(false);
@@ -89,6 +83,13 @@ const ChannelPage = () => {
   const currentSongRef = useRef(null);
   const socketRef = useRef(socket);
   const pendingSyncRef = useRef(null); // initial sync to apply when YT player is ready
+
+  // Must be after ytPlayerInstance ref is declared so playerRef.current works
+  const { onPlayerReady, markSelfControlled, startDriftLoop, stopDriftLoop } = useSyncEngine({
+    socket,
+    playerRef: ytPlayerInstance,
+    channelId,
+  });
 
   useEffect(() => { isRepeatRef.current = isRepeat; }, [isRepeat]);
   useEffect(() => { currentSongRef.current = currentSong; }, [currentSong]);
